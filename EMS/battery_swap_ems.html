@@ -1,0 +1,760 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>換電站 EMS 模擬工具 - Battery Swap Station</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+<style>
+:root {
+  --primary: #1565c0;
+  --primary-light: #1e88e5;
+  --success: #2e7d32;
+  --warning: #f57f17;
+  --danger: #c62828;
+  --bg: #f5f5f5;
+  --card: #ffffff;
+  --text: #212121;
+  --text-secondary: #757575;
+  --border: #e0e0e0;
+  --sidebar-w: 320px;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: 'Segoe UI', 'Microsoft JhengHei', sans-serif; background: var(--bg); color: var(--text); font-size: 14px; }
+#header { background: linear-gradient(135deg, var(--primary), #0d47a1); color: white; padding: 12px 24px; display: flex; align-items: center; justify-content: space-between; box-shadow: 0 2px 8px rgba(0,0,0,.2); }
+#header h1 { font-size: 20px; font-weight: 600; }
+#header .status { font-size: 13px; opacity: .9; }
+#app { display: flex; height: calc(100vh - 48px); }
+#sidebar { width: var(--sidebar-w); min-width: var(--sidebar-w); background: var(--card); border-right: 1px solid var(--border); overflow-y: auto; padding: 16px; }
+#sidebar h3 { font-size: 14px; color: var(--primary); margin: 16px 0 8px; border-bottom: 2px solid var(--primary-light); padding-bottom: 4px; }
+#sidebar h3:first-child { margin-top: 0; }
+.form-group { margin-bottom: 10px; }
+.form-group label { display: block; font-size: 12px; color: var(--text-secondary); margin-bottom: 3px; }
+.form-group input, .form-group select { width: 100%; padding: 6px 8px; border: 1px solid var(--border); border-radius: 4px; font-size: 13px; }
+.form-group input:focus { outline: none; border-color: var(--primary-light); }
+.btn-row { display: flex; gap: 8px; margin: 12px 0; }
+.btn { padding: 8px 16px; border: none; border-radius: 4px; font-size: 13px; font-weight: 600; cursor: pointer; flex: 1; transition: .2s; }
+.btn-start { background: var(--success); color: white; }
+.btn-start:hover { background: #388e3c; }
+.btn-pause { background: var(--warning); color: white; }
+.btn-pause:hover { background: #f9a825; }
+.btn-reset { background: var(--danger); color: white; }
+.btn-reset:hover { background: #d32f2f; }
+.btn:disabled { opacity: .5; cursor: not-allowed; }
+.speed-control { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
+.speed-control input[type=range] { flex: 1; }
+.speed-control span { font-size: 12px; min-width: 30px; }
+#main { flex: 1; overflow-y: auto; padding: 16px; }
+.stats-bar { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin-bottom: 16px; }
+.stat-card { background: var(--card); border-radius: 8px; padding: 12px; box-shadow: 0 1px 4px rgba(0,0,0,.08); text-align: center; }
+.stat-card .value { font-size: 22px; font-weight: 700; color: var(--primary); }
+.stat-card .label { font-size: 11px; color: var(--text-secondary); margin-top: 2px; }
+.charts-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 16px; }
+.chart-card { background: var(--card); border-radius: 8px; padding: 12px; box-shadow: 0 1px 4px rgba(0,0,0,.08); }
+.chart-card h4 { font-size: 13px; color: var(--text-secondary); margin-bottom: 8px; }
+.chart-card canvas { width: 100% !important; max-height: 260px; }
+.section-title { font-size: 15px; font-weight: 600; color: var(--primary); margin: 16px 0 8px; padding-bottom: 4px; border-bottom: 2px solid var(--primary-light); }
+#topology { background: var(--card); border-radius: 8px; padding: 16px; box-shadow: 0 1px 4px rgba(0,0,0,.08); margin-bottom: 16px; overflow-x: auto; }
+.topo-group { display: flex; align-items: center; gap: 6px; margin: 6px 0; padding: 6px 8px; border-radius: 6px; background: #fafafa; font-size: 12px; }
+.topo-group.active { background: #e8f5e9; }
+.topo-box { display: inline-flex; align-items: center; justify-content: center; padding: 4px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; min-width: 60px; text-align: center; }
+.topo-pcs { background: #e3f2fd; color: #1565c0; border: 1px solid #90caf9; }
+.topo-bus { background: #fff3e0; color: #e65100; width: 30px; font-weight: 700; }
+.topo-dcdc { background: #f3e5f5; color: #6a1b9a; border: 1px solid #ce93d8; min-width: 48px; }
+.topo-dcdc.off { background: #eeeeee; color: #9e9e9e; border-color: #bdbdbd; }
+.topo-dcdc.to-a { background: #e8f5e9; color: #2e7d32; border-color: #a5d6a7; }
+.topo-dcdc.to-b { background: #fff8e1; color: #f57f17; border-color: #ffe082; }
+.topo-batt { padding: 4px 10px; border-radius: 4px; font-size: 11px; font-weight: 600; min-width: 80px; border: 2px solid; }
+.topo-batt.charging { background: #e8f5e9; border-color: #4caf50; color: #1b5e20; }
+.topo-batt.full { background: #e3f2fd; border-color: #1565c0; color: #0d47a1; }
+.topo-batt.absent { background: #ffebee; border-color: #ef5350; color: #b71c1c; }
+.topo-batt.idle { background: #f5f5f5; border-color: #bdbdbd; color: #757575; }
+.topo-arrow { color: #bdbdbd; font-weight: 700; }
+.switch-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-bottom: 16px; }
+.switch-table th { background: var(--primary); color: white; padding: 8px; text-align: center; }
+.switch-table td { padding: 6px 8px; text-align: center; border: 1px solid var(--border); }
+.switch-table tr:nth-child(even) { background: #fafafa; }
+.switch-table .alloc-badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-weight: 600; font-size: 11px; }
+.alloc-30 { background: #c8e6c9; color: #1b5e20; }
+.alloc-03 { background: #fff9c4; color: #f57f17; }
+.alloc-21 { background: #dcedc8; color: #33691e; }
+.alloc-12 { background: #fff3e0; color: #e65100; }
+.alloc-11 { background: #e1f5fe; color: #0277bd; }
+.alloc-20 { background: #c8e6c9; color: #2e7d32; }
+.alloc-02 { background: #fff9c4; color: #ff8f00; }
+.alloc-10 { background: #e8f5e9; color: #388e3c; }
+.alloc-01 { background: #fffde7; color: #fbc02d; }
+.alloc-00 { background: #eeeeee; color: #757575; }
+#event-log { background: var(--card); border-radius: 8px; padding: 12px; box-shadow: 0 1px 4px rgba(0,0,0,.08); max-height: 200px; overflow-y: auto; font-size: 12px; font-family: 'Consolas', monospace; }
+#event-log .log-entry { padding: 2px 0; border-bottom: 1px solid #f5f5f5; }
+#event-log .log-time { color: var(--primary); font-weight: 600; margin-right: 8px; }
+#event-log .log-swap { color: var(--danger); }
+#event-log .log-alloc { color: var(--success); }
+#event-log .log-info { color: var(--text-secondary); }
+.eff-table { width: 100%; border-collapse: collapse; font-size: 11px; margin: 4px 0 8px; }
+.eff-table th, .eff-table td { padding: 3px 4px; border: 1px solid var(--border); text-align: center; }
+.eff-table th { background: #f5f5f5; font-weight: 600; }
+.eff-table input { width: 60px; padding: 2px 4px; border: 1px solid var(--border); border-radius: 3px; text-align: center; font-size: 11px; }
+</style>
+</head>
+<body>
+<div id="header">
+  <h1>&#x26A1; &#25563;&#38651;&#31449; EMS &#27169;&#25836;&#24037;&#20855;</h1>
+  <div class="status" id="headerStatus">&#23601;&#32210; - &#40670;&#25802;&#12300;&#38283;&#22987;&#27169;&#25836;&#12301;&#21855;&#21205;</div>
+</div>
+<div id="app">
+<aside id="sidebar">
+  <h3>&#9881;&#65039; &#27169;&#25836;&#21443;&#25976;</h3>
+  <div class="form-group"><label>&#27169;&#25836;&#26178;&#38263; (&#20998;&#37912;)</label><input type="number" id="simDuration" value="120" min="10" max="600"></div>
+  <div class="form-group"><label>&#25563;&#38651;&#38291;&#38548; (&#31186;)</label><input type="number" id="swapInterval" value="100" min="10" max="600"></div>
+  <div class="form-group"><label>&#20805;&#38651;&#38272;&#27323; SOC (%)</label><input type="number" id="socThreshold" value="90" min="50" max="100"></div>
+  <div class="form-group"><label>&#20837;&#31449;&#26368;&#39640; SOC (%)</label><input type="number" id="incomingSocMax" value="30" min="5" max="50"></div>
+  <div class="form-group"><label>&#38651;&#27744;&#23481;&#37327; (kWh)</label><input type="number" id="battCapacity" value="50" min="10" max="200"></div>
+  <div class="form-group"><label>DCDC &#23481;&#37327; (kW)</label><input type="number" id="dcdcMaxPower" value="50" min="10" max="200"></div>
+  <div class="form-group"><label>PCS &#23481;&#37327; (kW)</label><input type="number" id="pcsMaxPower" value="125" min="50" max="500"></div>
+  <div class="form-group"><label>&#26178;&#38291;&#27493;&#36914; (&#31186;)</label><input type="number" id="timeStep" value="10" min="1" max="60"></div>
+
+  <div class="btn-row">
+    <button class="btn btn-start" id="btnStart" onclick="startSim()">&#9654; &#38283;&#22987;</button>
+    <button class="btn btn-pause" id="btnPause" onclick="pauseSim()" disabled>&#9646;&#9646; &#26283;&#20572;</button>
+    <button class="btn btn-reset" id="btnReset" onclick="resetSim()">&#8635; &#37325;&#32622;</button>
+  </div>
+  <div class="speed-control">
+    <span>&#24930;</span>
+    <input type="range" id="speedSlider" min="1" max="100" value="50" oninput="updateSpeed()">
+    <span>&#24555;</span>
+    <span id="speedLabel">50x</span>
+  </div>
+
+  <h3>DCDC &#25928;&#29575;&#26354;&#32218;</h3>
+  <table class="eff-table" id="dcdcEffTable">
+    <tr><th>&#36000;&#36617;%</th><th>&#25928;&#29575;</th></tr>
+  </table>
+
+  <h3>PCS &#25928;&#29575;&#26354;&#32218;</h3>
+  <table class="eff-table" id="pcsEffTable">
+    <tr><th>&#36000;&#36617;%</th><th>&#25928;&#29575;</th></tr>
+  </table>
+</aside>
+
+<div id="main">
+  <div class="stats-bar">
+    <div class="stat-card"><div class="value" id="statTime">00:00</div><div class="label">&#27169;&#25836;&#26178;&#38291;</div></div>
+    <div class="stat-card"><div class="value" id="statGridPower">0 kW</div><div class="label">&#38651;&#32178;&#32317;&#21151;&#29575;</div></div>
+    <div class="stat-card"><div class="value" id="statBattPower">0 kW</div><div class="label">&#20805;&#38651;&#32317;&#21151;&#29575;</div></div>
+    <div class="stat-card"><div class="value" id="statEfficiency">0%</div><div class="label">&#31995;&#32113;&#25928;&#29575;</div></div>
+    <div class="stat-card"><div class="value" id="statSwaps">0</div><div class="label">&#25563;&#38651;&#27425;&#25976;</div></div>
+    <div class="stat-card"><div class="value" id="statEnergy">0 kWh</div><div class="label">&#32047;&#35336;&#20805;&#38651;&#37327;</div></div>
+  </div>
+
+  <div class="charts-grid">
+    <div class="chart-card"><h4>&#38651;&#27744; SOC &#35722;&#21270; (%)</h4><canvas id="socChart"></canvas></div>
+    <div class="chart-card"><h4>&#21151;&#29575;&#20998;&#24067; (kW)</h4><canvas id="powerChart"></canvas></div>
+    <div class="chart-card"><h4>&#31995;&#32113;&#25928;&#29575; (%)</h4><canvas id="effChart"></canvas></div>
+    <div class="chart-card"><h4>DCDC &#20998;&#37197;&#32113;&#35336;</h4><canvas id="allocChart"></canvas></div>
+  </div>
+
+  <div class="section-title">&#31449;&#39636;&#25299;&#25778;&#33287;&#38283;&#38364;&#29376;&#24907;</div>
+  <div id="topology"></div>
+
+  <div class="section-title">&#21508;&#32068; DCDC &#20998;&#37197;&#35443;&#24773;</div>
+  <table class="switch-table" id="switchTable">
+    <thead><tr>
+      <th>&#32068;&#21029;</th><th>&#38651;&#27744;A (ID/SOC)</th><th>&#38651;&#27744;B (ID/SOC)</th>
+      <th>&#20998;&#37197; (A:B)</th><th>&#20805;&#38651;&#21151;&#29575;A</th><th>&#20805;&#38651;&#21151;&#29575;B</th>
+      <th>DCDC&#36000;&#36617;%</th><th>PCS&#36000;&#36617;%</th><th>&#32068;&#25928;&#29575;</th>
+    </tr></thead>
+    <tbody id="switchTableBody"></tbody>
+  </table>
+
+  <div class="section-title">&#20107;&#20214;&#26085;&#35468;</div>
+  <div id="event-log"></div>
+</div>
+</div>
+<script>
+// ========== DATA TABLES ==========
+const BATTERY_TABLE = [
+  {soc:0,crate:2.74,time:0,power:138.32},{soc:5,crate:2.74,time:1.09,power:140.17},
+  {soc:10,crate:2.56,time:2.27,power:132.56},{soc:15,crate:2.42,time:3.5,power:127.09},
+  {soc:20,crate:2.29,time:4.82,power:121.44},{soc:25,crate:2.19,time:6.18,power:118.07},
+  {soc:30,crate:2.01,time:7.68,power:109.59},{soc:35,crate:1.83,time:9.32,power:100.86},
+  {soc:40,crate:1.69,time:11.09,power:94.44},{soc:45,crate:1.55,time:13.02,power:87.83},
+  {soc:50,crate:1.46,time:15.07,power:83.65},{soc:55,crate:1.37,time:17.26,power:79.35},
+  {soc:60,crate:1.33,time:19.52,power:77.6},{soc:65,crate:1.14,time:22.15,power:67.67},
+  {soc:70,crate:1.05,time:25,power:62.96},{soc:75,crate:0.87,time:28.46,power:53.38},
+  {soc:80,crate:0.73,time:32.56,power:46.11},{soc:85,crate:0.59,time:37.61,power:37.73},
+  {soc:90,crate:0.5,time:43.57,power:32.15},{soc:95,crate:0.41,time:50.86,power:26.49},
+  {soc:97,crate:0.37,time:54.15,power:24.04},{soc:99,crate:0.37,time:57.43,power:24.37},
+  {soc:100,crate:0.18,time:60.71,power:12.51}
+];
+
+const DEFAULT_DCDC_EFF = [
+  {load:5,eff:0.9265},{load:10,eff:0.9573},{load:20,eff:0.9700},{load:30,eff:0.9744},
+  {load:40,eff:0.9773},{load:50,eff:0.9783},{load:60,eff:0.9788},{load:70,eff:0.9784},
+  {load:80,eff:0.9780},{load:90,eff:0.9777},{load:100,eff:0.9774}
+];
+
+const DEFAULT_PCS_EFF = [
+  {load:10,eff:0.980186},{load:20,eff:0.982810},{load:30,eff:0.984732},{load:40,eff:0.984834},
+  {load:50,eff:0.983669},{load:60,eff:0.983029},{load:70,eff:0.982105},{load:80,eff:0.980972},
+  {load:90,eff:0.979730},{load:100,eff:0.978308}
+];
+
+const BATTERY_PAIRS = [[0,7],[1,8],[2,9],[3,10],[4,11],[5,12],[6,13]];
+const BATT_COLORS = [
+  '#e6194b','#3cb44b','#4363d8','#f58231','#911eb4','#42d4f4','#f032e6',
+  '#469990','#dcbeff','#9A6324','#ffe119','#800000','#aaffc3','#000075'
+];
+
+// ========== UTILITY ==========
+function interpolate(table, xVal, xKey, yKey) {
+  if (xVal <= table[0][xKey]) return table[0][yKey];
+  if (xVal >= table[table.length-1][xKey]) return table[table.length-1][yKey];
+  for (let i = 0; i < table.length - 1; i++) {
+    if (xVal >= table[i][xKey] && xVal <= table[i+1][xKey]) {
+      const t = (xVal - table[i][xKey]) / (table[i+1][xKey] - table[i][xKey]);
+      return table[i][yKey] + t * (table[i+1][yKey] - table[i][yKey]);
+    }
+  }
+  return table[table.length-1][yKey];
+}
+
+function getMaxChargePower(socPercent) {
+  return interpolate(BATTERY_TABLE, socPercent, 'soc', 'power');
+}
+
+function getDcdcEff(loadPercent) {
+  if (loadPercent <= 0) return 0;
+  return interpolate(dcdcEffCurve, Math.max(loadPercent, dcdcEffCurve[0].load), 'load', 'eff');
+}
+
+function getPcsEff(loadPercent) {
+  if (loadPercent <= 0) return 0;
+  return interpolate(pcsEffCurve, Math.max(loadPercent, pcsEffCurve[0].load), 'load', 'eff');
+}
+
+let dcdcEffCurve = [...DEFAULT_DCDC_EFF];
+let pcsEffCurve = [...DEFAULT_PCS_EFF];
+
+// ========== BATTERY MODEL ==========
+class Battery {
+  constructor(id) {
+    this.id = id;
+    this.soc = 50 + Math.random() * 40; // initial 50-90%
+    this.present = true;
+    this.chargePowerKw = 0;
+  }
+  maxChargePower() { return getMaxChargePower(this.soc); }
+  needsCharging(threshold) { return this.present && this.soc < threshold; }
+  charge(powerKw, dtSec, capacityKwh) {
+    if (!this.present || powerKw <= 0) { this.chargePowerKw = 0; return; }
+    const maxP = this.maxChargePower();
+    const actualP = Math.min(powerKw, maxP);
+    this.chargePowerKw = actualP;
+    const energyKwh = actualP * dtSec / 3600;
+    this.soc = Math.min(100, this.soc + (energyKwh / capacityKwh) * 100);
+  }
+  swapOut() { const s = this.soc; this.present = false; this.soc = 0; this.chargePowerKw = 0; return s; }
+  swapIn(newSoc) { this.soc = newSoc; this.present = true; this.chargePowerKw = 0; }
+}
+
+// ========== DCDC GROUP MODEL ==========
+class DCDCGroup {
+  constructor(groupId, battA, battB) {
+    this.groupId = groupId;
+    this.battA = battA;
+    this.battB = battB;
+    this.allocA = 0;
+    this.allocB = 0;
+    this.powerA = 0;
+    this.powerB = 0;
+    this.dcdcLoadA = 0;
+    this.dcdcLoadB = 0;
+    this.dcdcEffA = 0;
+    this.dcdcEffB = 0;
+    this.dcBusPower = 0;
+    this.pcsLoad = 0;
+    this.pcsEff = 0;
+    this.gridPower = 0;
+    this.groupEff = 0;
+  }
+
+  optimize(cfg) {
+    const threshold = cfg.socThreshold;
+    const dcdcMax = cfg.dcdcMaxPower;
+    const pcsMax = cfg.pcsMaxPower;
+    const needsA = this.battA.needsCharging(threshold);
+    const needsB = this.battB.needsCharging(threshold);
+
+    let bestScore = -1, bestNA = 0, bestNB = 0;
+
+    for (let nA = 0; nA <= 3; nA++) {
+      for (let nB = 0; nB <= 3 - nA; nB++) {
+        if (nA > 0 && !needsA) continue;
+        if (nB > 0 && !needsB) continue;
+
+        let pA = 0, pB = 0, dcBus = 0;
+        let eA = 1, eB = 1;
+
+        if (nA > 0 && needsA) {
+          pA = Math.min(nA * dcdcMax, this.battA.maxChargePower());
+          const loadA = (pA / nA) / dcdcMax * 100;
+          eA = getDcdcEff(loadA);
+          if (eA > 0) dcBus += pA / eA;
+        }
+        if (nB > 0 && needsB) {
+          pB = Math.min(nB * dcdcMax, this.battB.maxChargePower());
+          const loadB = (pB / nB) / dcdcMax * 100;
+          eB = getDcdcEff(loadB);
+          if (eB > 0) dcBus += pB / eB;
+        }
+
+        if (dcBus > pcsMax * 1.01) continue;
+
+        const totalP = pA + pB;
+        let sysEff = 0;
+        if (dcBus > 0) {
+          const pcsLoadPct = dcBus / pcsMax * 100;
+          const pEff = getPcsEff(pcsLoadPct);
+          const gPower = pEff > 0 ? dcBus / pEff : dcBus;
+          sysEff = gPower > 0 ? totalP / gPower : 0;
+        }
+        const score = totalP * 10000 + sysEff * 100;
+
+        if (score > bestScore) {
+          bestScore = score;
+          bestNA = nA;
+          bestNB = nB;
+        }
+      }
+    }
+    this.allocA = bestNA;
+    this.allocB = bestNB;
+  }
+
+  computePowerFlow(cfg) {
+    const dcdcMax = cfg.dcdcMaxPower;
+    const pcsMax = cfg.pcsMaxPower;
+    const threshold = cfg.socThreshold;
+
+    this.powerA = 0; this.powerB = 0;
+    this.dcdcLoadA = 0; this.dcdcLoadB = 0;
+    this.dcdcEffA = 0; this.dcdcEffB = 0;
+    this.dcBusPower = 0;
+
+    if (this.allocA > 0 && this.battA.needsCharging(threshold)) {
+      this.powerA = Math.min(this.allocA * dcdcMax, this.battA.maxChargePower());
+      this.dcdcLoadA = (this.powerA / this.allocA) / dcdcMax * 100;
+      this.dcdcEffA = getDcdcEff(this.dcdcLoadA);
+      if (this.dcdcEffA > 0) this.dcBusPower += this.powerA / this.dcdcEffA;
+    }
+    if (this.allocB > 0 && this.battB.needsCharging(threshold)) {
+      this.powerB = Math.min(this.allocB * dcdcMax, this.battB.maxChargePower());
+      this.dcdcLoadB = (this.powerB / this.allocB) / dcdcMax * 100;
+      this.dcdcEffB = getDcdcEff(this.dcdcLoadB);
+      if (this.dcdcEffB > 0) this.dcBusPower += this.powerB / this.dcdcEffB;
+    }
+
+    this.pcsLoad = this.dcBusPower / pcsMax * 100;
+    this.pcsEff = this.pcsLoad > 0 ? getPcsEff(this.pcsLoad) : 0;
+    this.gridPower = this.pcsEff > 0 ? this.dcBusPower / this.pcsEff : 0;
+    const totalBatt = this.powerA + this.powerB;
+    this.groupEff = this.gridPower > 0 ? totalBatt / this.gridPower : 0;
+  }
+
+  step(cfg) {
+    this.optimize(cfg);
+    this.computePowerFlow(cfg);
+    this.battA.charge(this.powerA, cfg.timeStep, cfg.battCapacity);
+    this.battB.charge(this.powerB, cfg.timeStep, cfg.battCapacity);
+  }
+}
+
+// ========== STATION MODEL ==========
+class Station {
+  constructor() {
+    this.batteries = [];
+    for (let i = 0; i < 14; i++) this.batteries.push(new Battery(i + 1));
+    this.groups = [];
+    for (let g = 0; g < 7; g++) {
+      this.groups.push(new DCDCGroup(g, this.batteries[BATTERY_PAIRS[g][0]], this.batteries[BATTERY_PAIRS[g][1]]));
+    }
+    this.swapIndex = 0;
+    this.swapAccum = 0;
+    this.swapCount = 0;
+    this.totalEnergyKwh = 0;
+  }
+
+  step(cfg, logFn) {
+    this.swapAccum += cfg.timeStep;
+    while (this.swapAccum >= cfg.swapInterval) {
+      this.swapAccum -= cfg.swapInterval;
+      this.performSwap(cfg, logFn);
+    }
+    for (const g of this.groups) g.step(cfg);
+    const battPower = this.groups.reduce((s, g) => s + g.powerA + g.powerB, 0);
+    this.totalEnergyKwh += battPower * cfg.timeStep / 3600;
+  }
+
+  performSwap(cfg, logFn) {
+    const batt = this.batteries[this.swapIndex];
+    const battId = this.swapIndex + 1;
+    if (batt.present && batt.soc >= cfg.socThreshold) {
+      const oldSoc = batt.swapOut();
+      const newSoc = Math.random() * cfg.incomingSocMax;
+      batt.swapIn(newSoc);
+      this.swapCount++;
+      if (logFn) logFn('swap', `電池 #${battId} 換出 (SOC ${oldSoc.toFixed(1)}%) → 換入新電池 (SOC ${newSoc.toFixed(1)}%)`);
+    } else if (!batt.present) {
+      const newSoc = Math.random() * cfg.incomingSocMax;
+      batt.swapIn(newSoc);
+      this.swapCount++;
+      if (logFn) logFn('swap', `電池槽 #${battId} 補入電池 (SOC ${newSoc.toFixed(1)}%)`);
+    } else {
+      if (logFn) logFn('info', `電池 #${battId} SOC ${batt.soc.toFixed(1)}% < ${cfg.socThreshold}%，等待充電完成`);
+    }
+    this.swapIndex = (this.swapIndex + 1) % 14;
+  }
+
+  getMetrics() {
+    const gridP = this.groups.reduce((s, g) => s + g.gridPower, 0);
+    const battP = this.groups.reduce((s, g) => s + g.powerA + g.powerB, 0);
+    const eff = gridP > 0 ? battP / gridP * 100 : 0;
+    return { gridPower: gridP, battPower: battP, efficiency: eff };
+  }
+}
+
+// ========== SIMULATION ENGINE ==========
+let station = null;
+let simTimer = null;
+let simTime = 0;
+let running = false;
+let speedMs = 20;
+let chartUpdateCounter = 0;
+
+const history = { time:[], gridPower:[], battPower:[], efficiency:[], soc:Array.from({length:14},()=>[]) };
+const allocHistory = [0,0,0,0,0,0,0,0,0,0]; // count of each allocation type
+
+function getConfig() {
+  return {
+    simDuration: parseFloat(document.getElementById('simDuration').value) * 60,
+    swapInterval: parseFloat(document.getElementById('swapInterval').value),
+    socThreshold: parseFloat(document.getElementById('socThreshold').value),
+    incomingSocMax: parseFloat(document.getElementById('incomingSocMax').value),
+    battCapacity: parseFloat(document.getElementById('battCapacity').value),
+    dcdcMaxPower: parseFloat(document.getElementById('dcdcMaxPower').value),
+    pcsMaxPower: parseFloat(document.getElementById('pcsMaxPower').value),
+    timeStep: parseFloat(document.getElementById('timeStep').value)
+  };
+}
+
+function addLog(type, msg) {
+  const log = document.getElementById('event-log');
+  const mm = Math.floor(simTime / 60);
+  const ss = Math.floor(simTime % 60);
+  const timeStr = `${String(mm).padStart(2,'0')}:${String(ss).padStart(2,'0')}`;
+  const cls = type === 'swap' ? 'log-swap' : type === 'alloc' ? 'log-alloc' : 'log-info';
+  const entry = document.createElement('div');
+  entry.className = 'log-entry';
+  entry.innerHTML = `<span class="log-time">[${timeStr}]</span><span class="${cls}">${msg}</span>`;
+  log.insertBefore(entry, log.firstChild);
+  if (log.children.length > 200) log.removeChild(log.lastChild);
+}
+
+function formatTime(sec) {
+  const m = Math.floor(sec / 60), s = Math.floor(sec % 60);
+  return `${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+}
+
+// ========== CHARTS ==========
+let socChart, powerChart, effChart, allocChart;
+
+function initCharts() {
+  const socDatasets = [];
+  for (let i = 0; i < 14; i++) {
+    socDatasets.push({
+      label: `#${i+1}`,
+      data: [],
+      borderColor: BATT_COLORS[i],
+      backgroundColor: 'transparent',
+      borderWidth: 1.5,
+      pointRadius: 0,
+      tension: 0.3
+    });
+  }
+  socChart = new Chart(document.getElementById('socChart'), {
+    type: 'line',
+    data: { labels: [], datasets: socDatasets },
+    options: {
+      responsive: true,
+      animation: false,
+      plugins: { legend: { display: true, position: 'right', labels: { boxWidth: 8, font: { size: 10 } } } },
+      scales: { y: { min: 0, max: 100, title: { display: true, text: 'SOC %' } }, x: { title: { display: true, text: '時間 (分)' } } }
+    }
+  });
+
+  powerChart = new Chart(document.getElementById('powerChart'), {
+    type: 'line',
+    data: {
+      labels: [],
+      datasets: [
+        { label: '電網功率', data: [], borderColor: '#c62828', backgroundColor: 'rgba(198,40,40,0.1)', fill: true, borderWidth: 2, pointRadius: 0, tension: 0.3 },
+        { label: '充電功率', data: [], borderColor: '#2e7d32', backgroundColor: 'rgba(46,125,50,0.1)', fill: true, borderWidth: 2, pointRadius: 0, tension: 0.3 }
+      ]
+    },
+    options: {
+      responsive: true, animation: false,
+      plugins: { legend: { labels: { boxWidth: 10, font: { size: 11 } } } },
+      scales: { y: { min: 0, title: { display: true, text: 'kW' } }, x: { title: { display: true, text: '時間 (分)' } } }
+    }
+  });
+
+  effChart = new Chart(document.getElementById('effChart'), {
+    type: 'line',
+    data: {
+      labels: [],
+      datasets: [{ label: '系統效率', data: [], borderColor: '#1565c0', backgroundColor: 'rgba(21,101,192,0.1)', fill: true, borderWidth: 2, pointRadius: 0, tension: 0.3 }]
+    },
+    options: {
+      responsive: true, animation: false,
+      plugins: { legend: { display: false } },
+      scales: { y: { min: 85, max: 100, title: { display: true, text: '效率 %' } }, x: { title: { display: true, text: '時間 (分)' } } }
+    }
+  });
+
+  allocChart = new Chart(document.getElementById('allocChart'), {
+    type: 'bar',
+    data: {
+      labels: ['3:0','0:3','2:1','1:2','2:0','0:2','1:1','1:0','0:1','0:0'],
+      datasets: [{ label: '出現次數', data: [0,0,0,0,0,0,0,0,0,0], backgroundColor: [
+        '#4caf50','#ff9800','#8bc34a','#ffc107','#66bb6a','#ffb74d','#29b6f6','#81c784','#fff176','#bdbdbd'
+      ]}]
+    },
+    options: {
+      responsive: true, animation: false,
+      plugins: { legend: { display: false } },
+      scales: { y: { title: { display: true, text: '次數' } }, x: { title: { display: true, text: 'DCDC分配 (A:B)' } } }
+    }
+  });
+}
+
+function getAllocIndex(a, b) {
+  const map = {'30':0,'03':1,'21':2,'12':3,'20':4,'02':5,'11':6,'10':7,'01':8,'00':9};
+  return map[`${a}${b}`] ?? 9;
+}
+
+function updateCharts() {
+  const timeMin = (simTime / 60).toFixed(1);
+  // SOC
+  socChart.data.labels.push(timeMin);
+  for (let i = 0; i < 14; i++) {
+    socChart.data.datasets[i].data.push(station.batteries[i].present ? station.batteries[i].soc : null);
+  }
+  socChart.update('none');
+
+  // Power
+  const m = station.getMetrics();
+  powerChart.data.labels.push(timeMin);
+  powerChart.data.datasets[0].data.push(m.gridPower.toFixed(1));
+  powerChart.data.datasets[1].data.push(m.battPower.toFixed(1));
+  powerChart.update('none');
+
+  // Efficiency
+  effChart.data.labels.push(timeMin);
+  effChart.data.datasets[0].data.push(m.efficiency > 0 ? m.efficiency.toFixed(2) : null);
+  effChart.update('none');
+
+  // Allocation count
+  for (const g of station.groups) {
+    const idx = getAllocIndex(g.allocA, g.allocB);
+    allocHistory[idx]++;
+  }
+  allocChart.data.datasets[0].data = [...allocHistory];
+  allocChart.update('none');
+}
+
+// ========== TOPOLOGY & TABLE ==========
+function updateTopology() {
+  const container = document.getElementById('topology');
+  const cfg = getConfig();
+  let html = '';
+  for (let g = 0; g < 7; g++) {
+    const grp = station.groups[g];
+    const isActive = grp.powerA > 0 || grp.powerB > 0;
+    html += `<div class="topo-group ${isActive ? 'active' : ''}">`;
+    html += `<b style="min-width:45px">G${g+1}</b>`;
+    html += `<span class="topo-box topo-pcs">PCS${g+1}<br>${grp.gridPower.toFixed(0)}kW</span>`;
+    html += `<span class="topo-arrow">→</span>`;
+    html += `<span class="topo-box topo-bus">DC</span>`;
+    html += `<span class="topo-arrow">→</span>`;
+    for (let d = 0; d < 3; d++) {
+      let cls = 'topo-dcdc off', label = 'OFF';
+      if (d < grp.allocA) { cls = 'topo-dcdc to-a'; label = '→A'; }
+      else if (d < grp.allocA + grp.allocB) { cls = 'topo-dcdc to-b'; label = '→B'; }
+      html += `<span class="topo-box ${cls}">DC${d+1} ${label}</span>`;
+    }
+    html += `<span class="topo-arrow">→</span>`;
+
+    const bA = grp.battA, bB = grp.battB;
+    const clsA = !bA.present ? 'absent' : bA.soc >= cfg.socThreshold ? 'full' : bA.chargePowerKw > 0 ? 'charging' : 'idle';
+    const clsB = !bB.present ? 'absent' : bB.soc >= cfg.socThreshold ? 'full' : bB.chargePowerKw > 0 ? 'charging' : 'idle';
+    html += `<span class="topo-batt ${clsA}">#${bA.id} ${bA.present ? bA.soc.toFixed(1)+'%' : '缺席'}</span>`;
+    html += `<span class="topo-batt ${clsB}">#${bB.id} ${bB.present ? bB.soc.toFixed(1)+'%' : '缺席'}</span>`;
+    html += `</div>`;
+  }
+  container.innerHTML = html;
+}
+
+function updateSwitchTable() {
+  const tbody = document.getElementById('switchTableBody');
+  let html = '';
+  for (let g = 0; g < 7; g++) {
+    const grp = station.groups[g];
+    const allocStr = `${grp.allocA}:${grp.allocB}`;
+    const allocCls = `alloc-${grp.allocA}${grp.allocB}`;
+    const avgDcdcLoad = ((grp.dcdcLoadA * grp.allocA + grp.dcdcLoadB * grp.allocB) / Math.max(1, grp.allocA + grp.allocB)).toFixed(1);
+    html += `<tr>`;
+    html += `<td><b>G${g+1}</b></td>`;
+    html += `<td>#${grp.battA.id} / ${grp.battA.present ? grp.battA.soc.toFixed(1)+'%' : '缺席'}</td>`;
+    html += `<td>#${grp.battB.id} / ${grp.battB.present ? grp.battB.soc.toFixed(1)+'%' : '缺席'}</td>`;
+    html += `<td><span class="alloc-badge ${allocCls}">${allocStr}</span></td>`;
+    html += `<td>${grp.powerA.toFixed(1)} kW</td>`;
+    html += `<td>${grp.powerB.toFixed(1)} kW</td>`;
+    html += `<td>${avgDcdcLoad}%</td>`;
+    html += `<td>${grp.pcsLoad.toFixed(1)}%</td>`;
+    html += `<td>${(grp.groupEff * 100).toFixed(1)}%</td>`;
+    html += `</tr>`;
+  }
+  tbody.innerHTML = html;
+}
+
+function updateStats() {
+  const m = station.getMetrics();
+  document.getElementById('statTime').textContent = formatTime(simTime);
+  document.getElementById('statGridPower').textContent = m.gridPower.toFixed(0) + ' kW';
+  document.getElementById('statBattPower').textContent = m.battPower.toFixed(0) + ' kW';
+  document.getElementById('statEfficiency').textContent = m.efficiency > 0 ? m.efficiency.toFixed(1) + '%' : '--';
+  document.getElementById('statSwaps').textContent = station.swapCount;
+  document.getElementById('statEnergy').textContent = station.totalEnergyKwh.toFixed(1) + ' kWh';
+}
+
+// ========== EFFICIENCY TABLE UI ==========
+function initEffTables() {
+  const dcdcTbl = document.getElementById('dcdcEffTable');
+  for (const row of DEFAULT_DCDC_EFF) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${row.load}%</td><td><input type="number" step="0.001" value="${row.eff}" data-type="dcdc" data-load="${row.load}"></td>`;
+    dcdcTbl.appendChild(tr);
+  }
+  const pcsTbl = document.getElementById('pcsEffTable');
+  for (const row of DEFAULT_PCS_EFF) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${row.load}%</td><td><input type="number" step="0.0001" value="${row.eff}" data-type="pcs" data-load="${row.load}"></td>`;
+    pcsTbl.appendChild(tr);
+  }
+  document.querySelectorAll('.eff-table input').forEach(inp => {
+    inp.addEventListener('change', () => {
+      const type = inp.dataset.type;
+      const load = parseFloat(inp.dataset.load);
+      const val = parseFloat(inp.value);
+      if (type === 'dcdc') {
+        const entry = dcdcEffCurve.find(e => e.load === load);
+        if (entry) entry.eff = val;
+      } else {
+        const entry = pcsEffCurve.find(e => e.load === load);
+        if (entry) entry.eff = val;
+      }
+    });
+  });
+}
+
+// ========== CONTROL ==========
+function startSim() {
+  if (!station) {
+    station = new Station();
+    addLog('info', '模擬初始化完成，14顆電池就位');
+  }
+  running = true;
+  document.getElementById('btnStart').disabled = true;
+  document.getElementById('btnPause').disabled = false;
+  document.getElementById('headerStatus').textContent = '模擬運行中...';
+  simTimer = setInterval(simTick, speedMs);
+}
+
+function pauseSim() {
+  running = false;
+  clearInterval(simTimer);
+  document.getElementById('btnStart').disabled = false;
+  document.getElementById('btnPause').disabled = true;
+  document.getElementById('headerStatus').textContent = '已暫停';
+}
+
+function resetSim() {
+  clearInterval(simTimer);
+  running = false;
+  simTime = 0;
+  station = null;
+  chartUpdateCounter = 0;
+  allocHistory.fill(0);
+  history.time = []; history.gridPower = []; history.battPower = []; history.efficiency = [];
+  for (let i = 0; i < 14; i++) history.soc[i] = [];
+  // Reset charts
+  if (socChart) { socChart.data.labels = []; socChart.data.datasets.forEach(d => d.data = []); socChart.update(); }
+  if (powerChart) { powerChart.data.labels = []; powerChart.data.datasets.forEach(d => d.data = []); powerChart.update(); }
+  if (effChart) { effChart.data.labels = []; effChart.data.datasets.forEach(d => d.data = []); effChart.update(); }
+  if (allocChart) { allocChart.data.datasets[0].data = [0,0,0,0,0,0,0,0,0,0]; allocChart.update(); }
+  document.getElementById('event-log').innerHTML = '';
+  document.getElementById('switchTableBody').innerHTML = '';
+  document.getElementById('topology').innerHTML = '<div style="color:#757575;text-align:center;padding:20px">點擊「開始」啟動模擬</div>';
+  document.getElementById('statTime').textContent = '00:00';
+  document.getElementById('statGridPower').textContent = '0 kW';
+  document.getElementById('statBattPower').textContent = '0 kW';
+  document.getElementById('statEfficiency').textContent = '0%';
+  document.getElementById('statSwaps').textContent = '0';
+  document.getElementById('statEnergy').textContent = '0 kWh';
+  document.getElementById('btnStart').disabled = false;
+  document.getElementById('btnPause').disabled = true;
+  document.getElementById('headerStatus').textContent = '已重置 - 點擊「開始」啟動';
+}
+
+function updateSpeed() {
+  const val = parseInt(document.getElementById('speedSlider').value);
+  speedMs = Math.max(1, 101 - val);
+  document.getElementById('speedLabel').textContent = val + 'x';
+  if (running) {
+    clearInterval(simTimer);
+    simTimer = setInterval(simTick, speedMs);
+  }
+}
+
+function simTick() {
+  const cfg = getConfig();
+  if (simTime >= cfg.simDuration) {
+    pauseSim();
+    addLog('info', `模擬完成！總時長 ${formatTime(simTime)}，換電 ${station.swapCount} 次，累計充電 ${station.totalEnergyKwh.toFixed(1)} kWh`);
+    document.getElementById('headerStatus').textContent = '模擬完成';
+    return;
+  }
+
+  station.step(cfg, addLog);
+  simTime += cfg.timeStep;
+  chartUpdateCounter++;
+
+  updateStats();
+  updateTopology();
+  updateSwitchTable();
+
+  if (chartUpdateCounter % 3 === 0) {
+    updateCharts();
+  }
+}
+
+// ========== INIT ==========
+document.addEventListener('DOMContentLoaded', () => {
+  initCharts();
+  initEffTables();
+  document.getElementById('topology').innerHTML = '<div style="color:#757575;text-align:center;padding:20px">點擊「開始」啟動模擬</div>';
+});
+</script>
+</body>
+</html>
