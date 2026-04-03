@@ -53,6 +53,7 @@ class Config:
     batt_capacity_kwh: float = 50      # 電池容量 (kWh)
     dcdc_max_power_kw: float = 50      # 單顆 DCDC 最大功率 (kW)
     pcs_max_power_kw: float = 125      # 單台 PCS 最大功率 (kW)
+    num_pcs: int = 7                   # PCS 數量 (並聯於 800Vdc 母線)
     num_batteries: int = 14
     num_groups: int = 7
     dcdcs_per_group: int = 3
@@ -202,17 +203,15 @@ class DCDCGroup:
         self.dcdc_load_b = 0.0
         self.dcdc_eff_a = 0.0
         self.dcdc_eff_b = 0.0
-        self.dc_bus_power = 0.0
-        self.pcs_load = 0.0
-        self.pcs_eff = 0.0
-        self.grid_power = 0.0
-        self.group_eff = 0.0
+        self.dc_bus_power = 0.0   # 該組從 800V 母線取用的功率
 
     def optimize(self, cfg: Config):
-        """列舉所有 DCDC 分配組合，選出最佳方案"""
+        """列舉所有 DCDC 分配組合，選出最佳方案
+        注意：PCS 限制在 Station 層級處理（並聯共用母線），
+        此處僅考慮 DCDC 容量與電池充電需求。
+        """
         threshold = cfg.soc_threshold
         dcdc_max = cfg.dcdc_max_power_kw
-        pcs_max = cfg.pcs_max_power_kw
         needs_a = self.batt_a.needs_charging(threshold)
         needs_b = self.batt_b.needs_charging(threshold)
 
@@ -227,33 +226,27 @@ class DCDCGroup:
                     continue
 
                 pa, pb, dc_bus = 0.0, 0.0, 0.0
+                ea, eb = 1.0, 1.0
 
                 if na > 0 and needs_a:
                     pa = min(na * dcdc_max, self.batt_a.max_charge_power())
                     load_a = (pa / na) / dcdc_max * 100
-                    eff_a = get_dcdc_eff(load_a)
-                    if eff_a > 0:
-                        dc_bus += pa / eff_a
+                    ea = get_dcdc_eff(load_a)
+                    if ea > 0:
+                        dc_bus += pa / ea
 
                 if nb > 0 and needs_b:
                     pb = min(nb * dcdc_max, self.batt_b.max_charge_power())
                     load_b = (pb / nb) / dcdc_max * 100
-                    eff_b = get_dcdc_eff(load_b)
-                    if eff_b > 0:
-                        dc_bus += pb / eff_b
-
-                if dc_bus > pcs_max * 1.01:
-                    continue
+                    eb = get_dcdc_eff(load_b)
+                    if eb > 0:
+                        dc_bus += pb / eb
 
                 total_p = pa + pb
-                sys_eff = 0
-                if dc_bus > 0:
-                    pcs_load_pct = dc_bus / pcs_max * 100
-                    p_eff = get_pcs_eff(pcs_load_pct)
-                    g_power = dc_bus / p_eff if p_eff > 0 else dc_bus
-                    sys_eff = total_p / g_power if g_power > 0 else 0
+                # DCDC 層效率 (不含 PCS，PCS 在 Station 層統一計算)
+                dcdc_eff = total_p / dc_bus if dc_bus > 0 else 0
+                score = total_p * 10000 + dcdc_eff * 100
 
-                score = total_p * 10000 + sys_eff * 100
                 if score > best_score:
                     best_score = score
                     best_na, best_nb = na, nb
@@ -262,9 +255,8 @@ class DCDCGroup:
         self.alloc_b = best_nb
 
     def compute_power_flow(self, cfg: Config):
-        """計算功率流"""
+        """計算該組的 DCDC 功率流 (不含 PCS，PCS 在 Station 層統一計算)"""
         dcdc_max = cfg.dcdc_max_power_kw
-        pcs_max = cfg.pcs_max_power_kw
         threshold = cfg.soc_threshold
 
         self.power_a = self.power_b = 0
@@ -285,12 +277,6 @@ class DCDCGroup:
             self.dcdc_eff_b = get_dcdc_eff(self.dcdc_load_b)
             if self.dcdc_eff_b > 0:
                 self.dc_bus_power += self.power_b / self.dcdc_eff_b
-
-        self.pcs_load = self.dc_bus_power / pcs_max * 100
-        self.pcs_eff = get_pcs_eff(self.pcs_load) if self.pcs_load > 0 else 0
-        self.grid_power = self.dc_bus_power / self.pcs_eff if self.pcs_eff > 0 else 0
-        total_batt = self.power_a + self.power_b
-        self.group_eff = total_batt / self.grid_power if self.grid_power > 0 else 0
 
     def step(self, cfg: Config):
         self.optimize(cfg)
@@ -314,6 +300,13 @@ class Station:
         self.swap_count = 0
         self.total_energy_kwh = 0.0
         self.events: List[dict] = []
+        # PCS 並聯狀態
+        self.active_pcs = cfg.num_pcs      # 目前啟用的 PCS 數量
+        self.pcs_total_load = 0.0          # 母線總負載 (kW)
+        self.pcs_load_per_unit = 0.0       # 每台 PCS 分攤負載 (kW)
+        self.pcs_load_pct = 0.0            # 每台 PCS 負載率 (%)
+        self.pcs_eff = 0.0                 # PCS 轉換效率
+        self.grid_power = 0.0              # 電網總功率 (kW)
 
     def step(self):
         cfg = self.cfg
@@ -321,10 +314,52 @@ class Station:
         while self.swap_accum >= cfg.swap_interval_s:
             self.swap_accum -= cfg.swap_interval_s
             self._perform_swap()
+
+        # 1. 各組 DCDC 獨立最佳化分配並計算功率流
         for g in self.groups:
             g.step(cfg)
+
+        # 2. 計算 800V 母線總負載 (所有 DCDC 組的 DC bus 功率總和)
+        self.pcs_total_load = sum(g.dc_bus_power for g in self.groups)
+
+        # 3. PCS 並聯最佳化：決定啟用幾台 PCS 以達最佳效率
+        self._optimize_pcs(cfg)
+
         batt_power = sum(g.power_a + g.power_b for g in self.groups)
         self.total_energy_kwh += batt_power * cfg.time_step_s / 3600
+
+    def _optimize_pcs(self, cfg: Config):
+        """最佳化 PCS 並聯數量，使每台 PCS 運行在最佳效率區間"""
+        total_load = self.pcs_total_load
+        if total_load <= 0:
+            self.active_pcs = 0
+            self.pcs_load_per_unit = 0
+            self.pcs_load_pct = 0
+            self.pcs_eff = 0
+            self.grid_power = 0
+            return
+
+        pcs_max = cfg.pcs_max_power_kw
+        best_eff = 0
+        best_n = 1
+
+        for n in range(1, cfg.num_pcs + 1):
+            # 檢查 n 台 PCS 是否能承載總負載
+            if total_load > n * pcs_max:
+                continue
+            # 每台 PCS 分攤的負載
+            load_per_unit = total_load / n
+            load_pct = load_per_unit / pcs_max * 100
+            eff = get_pcs_eff(load_pct)
+            if eff > best_eff:
+                best_eff = eff
+                best_n = n
+
+        self.active_pcs = best_n
+        self.pcs_load_per_unit = total_load / best_n
+        self.pcs_load_pct = self.pcs_load_per_unit / pcs_max * 100
+        self.pcs_eff = best_eff
+        self.grid_power = total_load / best_eff if best_eff > 0 else total_load
 
     def _perform_swap(self):
         cfg = self.cfg
@@ -357,10 +392,17 @@ class Station:
         self.swap_index = (self.swap_index + 1) % cfg.num_batteries
 
     def get_metrics(self) -> dict:
-        grid_p = sum(g.grid_power for g in self.groups)
         batt_p = sum(g.power_a + g.power_b for g in self.groups)
-        eff = batt_p / grid_p * 100 if grid_p > 0 else 0
-        return {'grid_power': grid_p, 'batt_power': batt_p, 'efficiency': eff}
+        eff = batt_p / self.grid_power * 100 if self.grid_power > 0 else 0
+        return {
+            'grid_power': self.grid_power,
+            'batt_power': batt_p,
+            'efficiency': eff,
+            'bus_power': self.pcs_total_load,
+            'active_pcs': self.active_pcs,
+            'pcs_load_pct': self.pcs_load_pct,
+            'pcs_eff': self.pcs_eff,
+        }
 
 
 # ========== SIMULATION ENGINE ==========
@@ -369,10 +411,14 @@ class SimHistory:
     time_min: list = field(default_factory=list)
     grid_power: list = field(default_factory=list)
     batt_power: list = field(default_factory=list)
+    bus_power: list = field(default_factory=list)
     efficiency: list = field(default_factory=list)
+    active_pcs: list = field(default_factory=list)
+    pcs_load_pct: list = field(default_factory=list)
+    pcs_eff: list = field(default_factory=list)
     soc: list = field(default_factory=lambda: [[] for _ in range(14)])
     alloc_counts: dict = field(default_factory=lambda: {})
-    swap_events: list = field(default_factory=list)  # (time_min, battery_id)
+    swap_events: list = field(default_factory=list)
     group_allocs: list = field(default_factory=lambda: [[] for _ in range(7)])
 
 
@@ -386,7 +432,7 @@ def run_simulation(cfg: Config) -> Tuple['Station', SimHistory]:
 
     print(f"開始模擬: 時長 {cfg.sim_duration_min} 分鐘, 步進 {cfg.time_step_s} 秒")
     print(f"換電間隔: {cfg.swap_interval_s} 秒, SOC 門檻: {cfg.soc_threshold}%")
-    print(f"DCDC: {cfg.dcdc_max_power_kw} kW x3/組, PCS: {cfg.pcs_max_power_kw} kW/組")
+    print(f"DCDC: {cfg.dcdc_max_power_kw} kW x3/組, PCS: {cfg.pcs_max_power_kw} kW x{cfg.num_pcs} (並聯)")
     print("-" * 60)
 
     while sim_time < duration_s:
@@ -401,7 +447,11 @@ def run_simulation(cfg: Config) -> Tuple['Station', SimHistory]:
         history.time_min.append(t_min)
         history.grid_power.append(metrics['grid_power'])
         history.batt_power.append(metrics['batt_power'])
+        history.bus_power.append(metrics['bus_power'])
         history.efficiency.append(metrics['efficiency'] if metrics['efficiency'] > 0 else None)
+        history.active_pcs.append(metrics['active_pcs'])
+        history.pcs_load_pct.append(metrics['pcs_load_pct'])
+        history.pcs_eff.append(metrics['pcs_eff'] * 100 if metrics['pcs_eff'] > 0 else None)
 
         for i in range(14):
             b = station.batteries[i]
@@ -418,7 +468,9 @@ def run_simulation(cfg: Config) -> Tuple['Station', SimHistory]:
         # Progress report
         if step_count % (300 // int(cfg.time_step_s)) == 0:
             print(f"  [{t_min:6.1f} 分] 電網: {metrics['grid_power']:7.1f} kW | "
+                  f"母線: {metrics['bus_power']:7.1f} kW | "
                   f"充電: {metrics['batt_power']:7.1f} kW | "
+                  f"PCS: {metrics['active_pcs']}/{cfg.num_pcs}台 {metrics['pcs_load_pct']:.0f}% | "
                   f"效率: {metrics['efficiency']:5.1f}% | "
                   f"換電: {station.swap_count} 次")
 
@@ -496,22 +548,31 @@ def plot_dashboard(station: Station, history: SimHistory, cfg: Config, output_pa
     ax3.legend(fontsize=9)
     ax3.grid(True, alpha=0.3)
 
-    # --- Panel 4: System Efficiency over time (middle-center) ---
+    # --- Panel 4: System & PCS Efficiency + Active PCS (middle-center) ---
     ax4 = fig.add_subplot(gs[1, 1])
     eff_clean = [e if e is not None else 0 for e in history.efficiency]
-    ax4.plot(history.time_min, eff_clean, color='#1565c0', linewidth=1.5)
-    ax4.fill_between(history.time_min, eff_clean, alpha=0.15, color='#1565c0')
+    pcs_eff_clean = [e if e is not None else 0 for e in history.pcs_eff]
+    ax4.plot(history.time_min, eff_clean, color='#1565c0', linewidth=1.5, label='系統效率')
+    ax4.plot(history.time_min, pcs_eff_clean, color='#ff9800', linewidth=1, alpha=0.7, label='PCS 效率')
+    ax4.fill_between(history.time_min, eff_clean, alpha=0.1, color='#1565c0')
     if eff_clean:
         valid_eff = [e for e in eff_clean if e > 0]
         if valid_eff:
             avg_eff = np.mean(valid_eff)
-            ax4.axhline(y=avg_eff, color='orange', linestyle='--', alpha=0.7,
-                        label=f'平均 {avg_eff:.1f}%')
-            ax4.legend(fontsize=9)
+            ax4.axhline(y=avg_eff, color='gray', linestyle='--', alpha=0.5,
+                        label=f'平均系統效率 {avg_eff:.1f}%')
+    # Secondary axis for active PCS count
+    ax4b = ax4.twinx()
+    ax4b.plot(history.time_min, history.active_pcs, color='#4caf50',
+              linewidth=1, alpha=0.6, linestyle='-', drawstyle='steps-post')
+    ax4b.set_ylabel('啟用 PCS 台數', color='#4caf50', fontsize=9)
+    ax4b.set_ylim(0, cfg.num_pcs + 1)
+    ax4b.tick_params(axis='y', labelcolor='#4caf50')
     ax4.set_xlabel('時間 (分鐘)')
     ax4.set_ylabel('效率 (%)')
-    ax4.set_title('系統效率 (充電功率/電網功率)')
+    ax4.set_title(f'系統效率 & PCS 並聯控制 ({cfg.num_pcs} 台)')
     ax4.set_ylim(85, 100)
+    ax4.legend(fontsize=8, loc='lower left')
     ax4.grid(True, alpha=0.3)
 
     # --- Panel 5: Group allocation timeline (middle-right) ---
@@ -537,38 +598,43 @@ def plot_dashboard(station: Station, history: SimHistory, cfg: Config, output_pa
     # --- Panel 6: Topology Diagram (bottom-left 2 cols) ---
     ax6 = fig.add_subplot(gs[2, :2])
     ax6.set_xlim(0, 100)
-    ax6.set_ylim(-1, 8)
+    ax6.set_ylim(-2, 9)
     ax6.set_aspect('auto')
     ax6.axis('off')
     ax6.set_title('站體拓撲與最終開關狀態', fontsize=12, fontweight='bold')
 
-    # Draw topology for each group
+    # Draw PCS parallel bank (shared, at top)
+    pcs_y = 8.3
+    ax6.add_patch(FancyBboxPatch((1, pcs_y-0.35), 18, 0.7, boxstyle="round,pad=0.1",
+                                 facecolor='#e3f2fd', edgecolor='#1565c0', linewidth=1.5))
+    ax6.text(10, pcs_y, f'PCS x{station.active_pcs}/{cfg.num_pcs} 並聯 | '
+             f'負載 {station.pcs_load_pct:.0f}% | '
+             f'效率 {station.pcs_eff*100:.1f}% | '
+             f'電網 {station.grid_power:.0f}kW',
+             fontsize=8, ha='center', va='center', color='#0d47a1', fontweight='bold')
+
+    # 800V DC Bus (shared horizontal bar)
+    bus_y = 7.5
+    ax6.add_patch(FancyBboxPatch((1, bus_y-0.15), 18, 0.3, boxstyle="round,pad=0.02",
+                                 facecolor='#fff3e0', edgecolor='#e65100', linewidth=1.5))
+    ax6.text(10, bus_y, f'800Vdc 共用母線 | {station.pcs_total_load:.0f} kW',
+             fontsize=7, ha='center', va='center', color='#e65100', fontweight='bold')
+
+    # Draw topology for each DCDC group
     for g_idx in range(7):
-        y = 7 - g_idx
+        y = 6.5 - g_idx
         grp = station.groups[g_idx]
 
         # Group label
         ax6.text(1, y, f'G{g_idx+1}', fontsize=9, fontweight='bold',
                  ha='center', va='center')
 
-        # PCS box
-        pcs_color = '#e3f2fd' if grp.grid_power > 0 else '#eeeeee'
-        ax6.add_patch(FancyBboxPatch((4, y-0.35), 10, 0.7, boxstyle="round,pad=0.1",
-                                     facecolor=pcs_color, edgecolor='#1565c0', linewidth=1))
-        ax6.text(9, y, f'PCS {grp.grid_power:.0f}kW', fontsize=7,
-                 ha='center', va='center', color='#1565c0')
+        # Bus tap line
+        ax6.plot([10, 10, 20, 20], [bus_y - 0.15, y, y, y], color='#e65100',
+                 linewidth=0.5, alpha=0.3)
 
-        # Arrow
-        ax6.annotate('', xy=(16, y), xytext=(14.5, y),
-                     arrowprops=dict(arrowstyle='->', color='#bbb', lw=1.2))
-
-        # DC Bus
-        ax6.add_patch(FancyBboxPatch((16.5, y-0.25), 4, 0.5, boxstyle="round,pad=0.05",
-                                     facecolor='#fff3e0', edgecolor='#e65100', linewidth=1))
-        ax6.text(18.5, y, '800V', fontsize=6, ha='center', va='center', color='#e65100')
-
-        # Arrow
-        ax6.annotate('', xy=(22.5, y), xytext=(21, y),
+        # Arrow from bus
+        ax6.annotate('', xy=(22.5, y), xytext=(20, y),
                      arrowprops=dict(arrowstyle='->', color='#bbb', lw=1.2))
 
         # 3 DCDC boxes
@@ -613,7 +679,9 @@ def plot_dashboard(station: Station, history: SimHistory, cfg: Config, output_pa
                  bbox=dict(boxstyle='round,pad=0.2', facecolor='#e3f2fd', edgecolor='#90caf9'))
 
         # Efficiency
-        eff_str = f'{grp.group_eff*100:.1f}%' if grp.group_eff > 0 else '--'
+        total_batt_g = grp.power_a + grp.power_b
+        dcdc_eff_g = total_batt_g / grp.dc_bus_power * 100 if grp.dc_bus_power > 0 else 0
+        eff_str = f'{dcdc_eff_g:.1f}%' if dcdc_eff_g > 0 else '--'
         ax6.text(92, y, f'η={eff_str}', fontsize=7, ha='center', va='center', color='#555')
 
     # Legend for topology
@@ -652,7 +720,8 @@ def plot_dashboard(station: Station, history: SimHistory, cfg: Config, output_pa
         f"{'─'*30}\n"
         f"電池容量:   {cfg.batt_capacity_kwh} kWh\n"
         f"DCDC 容量:  {cfg.dcdc_max_power_kw} kW x3/組\n"
-        f"PCS 容量:   {cfg.pcs_max_power_kw} kW/組\n"
+        f"PCS 容量:   {cfg.pcs_max_power_kw} kW x{cfg.num_pcs} (並聯)\n"
+        f"PCS 最終狀態: {station.active_pcs}/{cfg.num_pcs} 台\n"
         f"{'─'*30}\n"
         f"DCDC 分配統計:\n"
     )
@@ -672,14 +741,20 @@ def plot_dashboard(station: Station, history: SimHistory, cfg: Config, output_pa
 
 # ========== SWITCH STATE REPORT ==========
 def print_switch_table(station: Station, cfg: Config):
-    """印出各組 DCDC 分配詳情"""
-    print("\n" + "=" * 100)
+    """印出各組 DCDC 分配詳情 + PCS 並聯狀態"""
+    print("\n" + "=" * 105)
+    print(f"PCS 並聯狀態: {station.active_pcs}/{cfg.num_pcs} 台啟用 | "
+          f"每台負載: {station.pcs_load_per_unit:.1f} kW ({station.pcs_load_pct:.1f}%) | "
+          f"PCS 效率: {station.pcs_eff*100:.1f}% | "
+          f"母線總負載: {station.pcs_total_load:.1f} kW | "
+          f"電網總功率: {station.grid_power:.1f} kW")
+    print("=" * 105)
     print("各組 DCDC 開關分配詳情")
-    print("=" * 100)
+    print("-" * 105)
     header = f"{'組別':^6}|{'電池A (ID/SOC)':^18}|{'電池B (ID/SOC)':^18}|{'分配(A:B)':^10}|" \
-             f"{'功率A(kW)':^10}|{'功率B(kW)':^10}|{'DCDC負載%':^10}|{'PCS負載%':^10}|{'組效率':^8}"
+             f"{'功率A(kW)':^10}|{'功率B(kW)':^10}|{'DCDC負載%':^10}|{'母線取用kW':^12}|{'DCDC效率':^10}"
     print(header)
-    print("-" * 100)
+    print("-" * 105)
 
     for g in station.groups:
         ba_str = f"#{g.batt_a.id} / {g.batt_a.soc:.1f}%" if g.batt_a.present else f"#{g.batt_a.id} / 缺席"
@@ -687,11 +762,13 @@ def print_switch_table(station: Station, cfg: Config):
         alloc_str = f"{g.alloc_a}:{g.alloc_b}"
         total_dcdc = g.alloc_a + g.alloc_b
         avg_dcdc_load = (g.dcdc_load_a * g.alloc_a + g.dcdc_load_b * g.alloc_b) / max(1, total_dcdc)
-        eff_str = f"{g.group_eff*100:.1f}%" if g.group_eff > 0 else "--"
+        total_batt = g.power_a + g.power_b
+        dcdc_eff = total_batt / g.dc_bus_power * 100 if g.dc_bus_power > 0 else 0
+        eff_str = f"{dcdc_eff:.1f}%" if dcdc_eff > 0 else "--"
 
         print(f"  G{g.group_id+1}  |{ba_str:^18}|{bb_str:^18}|{alloc_str:^10}|"
-              f"{g.power_a:^10.1f}|{g.power_b:^10.1f}|{avg_dcdc_load:^10.1f}|{g.pcs_load:^10.1f}|{eff_str:^8}")
-    print("=" * 100)
+              f"{g.power_a:^10.1f}|{g.power_b:^10.1f}|{avg_dcdc_load:^10.1f}|{g.dc_bus_power:^12.1f}|{eff_str:^10}")
+    print("=" * 105)
 
 
 # ========== MAIN ==========
