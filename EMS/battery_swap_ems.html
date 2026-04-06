@@ -143,6 +143,7 @@ body { font-family: 'Segoe UI', 'Microsoft JhengHei', sans-serif; background: va
     <div class="stat-card"><div class="value" id="statGridPower">0 kW</div><div class="label">&#38651;&#32178;&#32317;&#21151;&#29575;</div></div>
     <div class="stat-card"><div class="value" id="statBattPower">0 kW</div><div class="label">&#20805;&#38651;&#32317;&#21151;&#29575;</div></div>
     <div class="stat-card"><div class="value" id="statEfficiency">0%</div><div class="label">&#31995;&#32113;&#25928;&#29575;</div></div>
+    <div class="stat-card"><div class="value" id="statPcs">0/7</div><div class="label">PCS &#20006;&#32879; (&#21488;)</div></div>
     <div class="stat-card"><div class="value" id="statSwaps">0</div><div class="label">&#25563;&#38651;&#27425;&#25976;</div></div>
     <div class="stat-card"><div class="value" id="statEnergy">0 kWh</div><div class="label">&#32047;&#35336;&#20805;&#38651;&#37327;</div></div>
   </div>
@@ -162,7 +163,7 @@ body { font-family: 'Segoe UI', 'Microsoft JhengHei', sans-serif; background: va
     <thead><tr>
       <th>&#32068;&#21029;</th><th>&#38651;&#27744;A (ID/SOC)</th><th>&#38651;&#27744;B (ID/SOC)</th>
       <th>&#20998;&#37197; (A:B)</th><th>&#20805;&#38651;&#21151;&#29575;A</th><th>&#20805;&#38651;&#21151;&#29575;B</th>
-      <th>DCDC&#36000;&#36617;%</th><th>PCS&#36000;&#36617;%</th><th>&#32068;&#25928;&#29575;</th>
+      <th>DCDC&#36000;&#36617;%</th><th>&#27597;&#32218;&#21462;&#29992;</th><th>DCDC&#25928;&#29575;</th>
     </tr></thead>
     <tbody id="switchTableBody"></tbody>
   </table>
@@ -272,17 +273,12 @@ class DCDCGroup {
     this.dcdcLoadB = 0;
     this.dcdcEffA = 0;
     this.dcdcEffB = 0;
-    this.dcBusPower = 0;
-    this.pcsLoad = 0;
-    this.pcsEff = 0;
-    this.gridPower = 0;
-    this.groupEff = 0;
+    this.dcBusPower = 0;  // 該組從 800V 母線取用功率
   }
 
   optimize(cfg) {
     const threshold = cfg.socThreshold;
     const dcdcMax = cfg.dcdcMaxPower;
-    const pcsMax = cfg.pcsMaxPower;
     const needsA = this.battA.needsCharging(threshold);
     const needsB = this.battB.needsCharging(threshold);
 
@@ -294,32 +290,23 @@ class DCDCGroup {
         if (nB > 0 && !needsB) continue;
 
         let pA = 0, pB = 0, dcBus = 0;
-        let eA = 1, eB = 1;
 
         if (nA > 0 && needsA) {
           pA = Math.min(nA * dcdcMax, this.battA.maxChargePower());
           const loadA = (pA / nA) / dcdcMax * 100;
-          eA = getDcdcEff(loadA);
+          const eA = getDcdcEff(loadA);
           if (eA > 0) dcBus += pA / eA;
         }
         if (nB > 0 && needsB) {
           pB = Math.min(nB * dcdcMax, this.battB.maxChargePower());
           const loadB = (pB / nB) / dcdcMax * 100;
-          eB = getDcdcEff(loadB);
+          const eB = getDcdcEff(loadB);
           if (eB > 0) dcBus += pB / eB;
         }
 
-        if (dcBus > pcsMax * 1.01) continue;
-
         const totalP = pA + pB;
-        let sysEff = 0;
-        if (dcBus > 0) {
-          const pcsLoadPct = dcBus / pcsMax * 100;
-          const pEff = getPcsEff(pcsLoadPct);
-          const gPower = pEff > 0 ? dcBus / pEff : dcBus;
-          sysEff = gPower > 0 ? totalP / gPower : 0;
-        }
-        const score = totalP * 10000 + sysEff * 100;
+        const dcdcEff = dcBus > 0 ? totalP / dcBus : 0;
+        const score = totalP * 10000 + dcdcEff * 100;
 
         if (score > bestScore) {
           bestScore = score;
@@ -334,7 +321,6 @@ class DCDCGroup {
 
   computePowerFlow(cfg) {
     const dcdcMax = cfg.dcdcMaxPower;
-    const pcsMax = cfg.pcsMaxPower;
     const threshold = cfg.socThreshold;
 
     this.powerA = 0; this.powerB = 0;
@@ -354,12 +340,6 @@ class DCDCGroup {
       this.dcdcEffB = getDcdcEff(this.dcdcLoadB);
       if (this.dcdcEffB > 0) this.dcBusPower += this.powerB / this.dcdcEffB;
     }
-
-    this.pcsLoad = this.dcBusPower / pcsMax * 100;
-    this.pcsEff = this.pcsLoad > 0 ? getPcsEff(this.pcsLoad) : 0;
-    this.gridPower = this.pcsEff > 0 ? this.dcBusPower / this.pcsEff : 0;
-    const totalBatt = this.powerA + this.powerB;
-    this.groupEff = this.gridPower > 0 ? totalBatt / this.gridPower : 0;
   }
 
   step(cfg) {
@@ -383,6 +363,14 @@ class Station {
     this.swapAccum = 0;
     this.swapCount = 0;
     this.totalEnergyKwh = 0;
+    // PCS 並聯狀態
+    this.numPcs = 7;
+    this.activePcs = 7;
+    this.pcsTotalLoad = 0;
+    this.pcsLoadPerUnit = 0;
+    this.pcsLoadPct = 0;
+    this.pcsEff = 0;
+    this.gridPower = 0;
   }
 
   step(cfg, logFn) {
@@ -392,8 +380,34 @@ class Station {
       this.performSwap(cfg, logFn);
     }
     for (const g of this.groups) g.step(cfg);
+    // PCS 並聯最佳化
+    this.pcsTotalLoad = this.groups.reduce((s, g) => s + g.dcBusPower, 0);
+    this._optimizePcs(cfg);
     const battPower = this.groups.reduce((s, g) => s + g.powerA + g.powerB, 0);
     this.totalEnergyKwh += battPower * cfg.timeStep / 3600;
+  }
+
+  _optimizePcs(cfg) {
+    const totalLoad = this.pcsTotalLoad;
+    if (totalLoad <= 0) {
+      this.activePcs = 0; this.pcsLoadPerUnit = 0; this.pcsLoadPct = 0;
+      this.pcsEff = 0; this.gridPower = 0;
+      return;
+    }
+    const pcsMax = cfg.pcsMaxPower;
+    let bestEff = 0, bestN = 1;
+    for (let n = 1; n <= this.numPcs; n++) {
+      if (totalLoad > n * pcsMax) continue;
+      const loadPer = totalLoad / n;
+      const loadPct = loadPer / pcsMax * 100;
+      const eff = getPcsEff(loadPct);
+      if (eff > bestEff) { bestEff = eff; bestN = n; }
+    }
+    this.activePcs = bestN;
+    this.pcsLoadPerUnit = totalLoad / bestN;
+    this.pcsLoadPct = this.pcsLoadPerUnit / pcsMax * 100;
+    this.pcsEff = bestEff;
+    this.gridPower = bestEff > 0 ? totalLoad / bestEff : totalLoad;
   }
 
   performSwap(cfg, logFn) {
@@ -417,10 +431,10 @@ class Station {
   }
 
   getMetrics() {
-    const gridP = this.groups.reduce((s, g) => s + g.gridPower, 0);
     const battP = this.groups.reduce((s, g) => s + g.powerA + g.powerB, 0);
-    const eff = gridP > 0 ? battP / gridP * 100 : 0;
-    return { gridPower: gridP, battPower: battP, efficiency: eff };
+    const eff = this.gridPower > 0 ? battP / this.gridPower * 100 : 0;
+    return { gridPower: this.gridPower, battPower: battP, efficiency: eff,
+             activePcs: this.activePcs, pcsLoadPct: this.pcsLoadPct, pcsEff: this.pcsEff };
   }
 }
 
@@ -578,14 +592,19 @@ function updateTopology() {
   const container = document.getElementById('topology');
   const cfg = getConfig();
   let html = '';
+  // PCS 並聯狀態區塊
+  html += `<div class="topo-group active" style="background:#e3f2fd;border:2px solid #1565c0;margin-bottom:8px">`;
+  html += `<b style="min-width:80px;color:#0d47a1">PCS 並聯</b>`;
+  html += `<span class="topo-box topo-pcs" style="min-width:200px">PCS x${station.activePcs}/${station.numPcs} | 負載 ${station.pcsLoadPct.toFixed(0)}% | 效率 ${(station.pcsEff*100).toFixed(1)}% | 電網 ${station.gridPower.toFixed(0)}kW</span>`;
+  html += `<span class="topo-arrow">→</span>`;
+  html += `<span class="topo-box topo-bus" style="min-width:130px">800Vdc 母線 ${station.pcsTotalLoad.toFixed(0)}kW</span>`;
+  html += `</div>`;
   for (let g = 0; g < 7; g++) {
     const grp = station.groups[g];
     const isActive = grp.powerA > 0 || grp.powerB > 0;
     html += `<div class="topo-group ${isActive ? 'active' : ''}">`;
     html += `<b style="min-width:45px">G${g+1}</b>`;
-    html += `<span class="topo-box topo-pcs">PCS${g+1}<br>${grp.gridPower.toFixed(0)}kW</span>`;
-    html += `<span class="topo-arrow">→</span>`;
-    html += `<span class="topo-box topo-bus">DC</span>`;
+    html += `<span class="topo-box topo-bus" style="font-size:10px">${grp.dcBusPower.toFixed(0)}kW</span>`;
     html += `<span class="topo-arrow">→</span>`;
     for (let d = 0; d < 3; d++) {
       let cls = 'topo-dcdc off', label = 'OFF';
@@ -620,9 +639,11 @@ function updateSwitchTable() {
     html += `<td><span class="alloc-badge ${allocCls}">${allocStr}</span></td>`;
     html += `<td>${grp.powerA.toFixed(1)} kW</td>`;
     html += `<td>${grp.powerB.toFixed(1)} kW</td>`;
+    const totalBatt = grp.powerA + grp.powerB;
+    const dcdcEff = grp.dcBusPower > 0 ? (totalBatt / grp.dcBusPower * 100).toFixed(1) : '--';
     html += `<td>${avgDcdcLoad}%</td>`;
-    html += `<td>${grp.pcsLoad.toFixed(1)}%</td>`;
-    html += `<td>${(grp.groupEff * 100).toFixed(1)}%</td>`;
+    html += `<td>${grp.dcBusPower.toFixed(1)} kW</td>`;
+    html += `<td>${dcdcEff}%</td>`;
     html += `</tr>`;
   }
   tbody.innerHTML = html;
@@ -634,6 +655,7 @@ function updateStats() {
   document.getElementById('statGridPower').textContent = m.gridPower.toFixed(0) + ' kW';
   document.getElementById('statBattPower').textContent = m.battPower.toFixed(0) + ' kW';
   document.getElementById('statEfficiency').textContent = m.efficiency > 0 ? m.efficiency.toFixed(1) + '%' : '--';
+  document.getElementById('statPcs').textContent = `${m.activePcs}/${station.numPcs} (${m.pcsLoadPct.toFixed(0)}%)`;
   document.getElementById('statSwaps').textContent = station.swapCount;
   document.getElementById('statEnergy').textContent = station.totalEnergyKwh.toFixed(1) + ' kWh';
 }
@@ -710,6 +732,7 @@ function resetSim() {
   document.getElementById('statGridPower').textContent = '0 kW';
   document.getElementById('statBattPower').textContent = '0 kW';
   document.getElementById('statEfficiency').textContent = '0%';
+  document.getElementById('statPcs').textContent = '0/7';
   document.getElementById('statSwaps').textContent = '0';
   document.getElementById('statEnergy').textContent = '0 kWh';
   document.getElementById('btnStart').disabled = false;
