@@ -3,6 +3,7 @@
 Facebook Content Tracker - 每日追蹤 Facebook 作者貼文
 
 用法：
+    python facebook_tracker.py setup-cookies       # 首次使用：取得 Facebook cookies
     python facebook_tracker.py run                 # 執行完整抓取
     python facebook_tracker.py run --author "黃仁勳" # 只抓特定作者
     python facebook_tracker.py list                # 顯示已設定的作者
@@ -10,6 +11,7 @@ Facebook Content Tracker - 每日追蹤 Facebook 作者貼文
 """
 
 import argparse
+import json
 import logging
 import sys
 import time
@@ -55,6 +57,83 @@ def load_config(config_path: str = CONFIG_FILE) -> TrackerConfig:
         request_delay_s=raw.get("request_delay_s", 3.0),
         facebook_cookies=raw.get("facebook_cookies", ""),
     )
+
+
+def cmd_setup_cookies(config: TrackerConfig, output_path: str = "cookies.json"):
+    """互動式取得 Facebook cookies"""
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        print("錯誤: 需要 Playwright 來取得 cookies")
+        print("請安裝: pip install playwright && playwright install chromium")
+        sys.exit(1)
+
+    print("=" * 60)
+    print("Facebook Cookies 設定工具")
+    print("=" * 60)
+    print()
+    print("即將開啟瀏覽器視窗，請在瀏覽器中登入 Facebook。")
+    print("登入成功後，程式會自動儲存 cookies。")
+    print()
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=False)
+        context = browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
+            locale="zh-TW",
+        )
+        page = context.new_page()
+        page.goto("https://www.facebook.com/", wait_until="networkidle")
+
+        print("等待登入中... (請在瀏覽器中完成登入)")
+        print("提示：登入後程式會自動偵測並儲存 cookies")
+        print()
+
+        # 輪詢等待登入成功（檢查 c_user cookie）
+        max_wait = 300  # 最多等 5 分鐘
+        waited = 0
+        while waited < max_wait:
+            cookies = context.cookies()
+            c_user = [c for c in cookies if c["name"] == "c_user"]
+            if c_user:
+                print("偵測到登入成功！")
+                break
+            time.sleep(2)
+            waited += 2
+            if waited % 30 == 0:
+                print(f"  仍在等待登入... ({waited}s)")
+
+        if waited >= max_wait:
+            print("逾時：未偵測到登入。請重新執行。")
+            browser.close()
+            sys.exit(1)
+
+        # 儲存 cookies
+        all_cookies = context.cookies()
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(all_cookies, f, indent=2, ensure_ascii=False)
+
+        browser.close()
+
+    # 顯示結果
+    cookie_names = [c["name"] for c in all_cookies]
+    has_essential = "c_user" in cookie_names and "xs" in cookie_names
+
+    print()
+    print(f"已儲存 {len(all_cookies)} 個 cookies 到: {output_path}")
+    if has_essential:
+        print("✅ 關鍵 cookies (c_user, xs) 已取得")
+    else:
+        print("⚠️  未找到關鍵 cookies，抓取可能受限")
+
+    print()
+    print("下一步：")
+    print(f"1. 確認 config.yaml 中 facebook_cookies 設為 \"{output_path}\"")
+    print("2. 執行 python facebook_tracker.py run 開始抓取")
 
 
 def cmd_list(config: TrackerConfig):
@@ -192,6 +271,13 @@ def main():
 
     subparsers = parser.add_subparsers(dest="command", help="子指令")
 
+    # setup-cookies
+    cookies_parser = subparsers.add_parser("setup-cookies", help="互動式取得 Facebook cookies")
+    cookies_parser.add_argument(
+        "--output", default="cookies.json",
+        help="cookies 儲存路徑 (預設: cookies.json)",
+    )
+
     # run
     run_parser = subparsers.add_parser("run", help="執行抓取")
     run_parser.add_argument("--author", default="", help="只抓取特定作者（名稱關鍵字）")
@@ -219,7 +305,9 @@ def main():
 
     config = load_config(args.config)
 
-    if args.command == "list":
+    if args.command == "setup-cookies":
+        cmd_setup_cookies(config, args.output)
+    elif args.command == "list":
         cmd_list(config)
     elif args.command == "run":
         cmd_run(config, args.author)
