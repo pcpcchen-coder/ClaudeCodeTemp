@@ -1,13 +1,42 @@
-"""Facebook Content Tracker - 抓取引擎（雙引擎支援）"""
+"""Facebook Content Tracker - 抓取引擎（三引擎支援）"""
 
+import json
 import logging
+import re
 import time
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
+from pathlib import Path
+from urllib.parse import urljoin
 
 from models import AuthorConfig, Post, FetchResult
 
 logger = logging.getLogger(__name__)
+
+MBASIC_BASE = "https://mbasic.facebook.com"
+
+
+def _extract_account(url: str) -> str:
+    """從 Facebook URL 擷取帳號名稱或 ID"""
+    url = url.rstrip("/")
+    parts = url.split("/")
+    return parts[-1] if parts else url
+
+
+def _load_cookies_as_dict(cookies_path: str) -> dict[str, str]:
+    """從 JSON 檔案載入 cookies 為 dict（給 requests 用）"""
+    path = Path(cookies_path)
+    if not path.exists():
+        return {}
+    with open(path, "r", encoding="utf-8") as f:
+        cookies_list = json.load(f)
+    # Playwright 格式: [{"name": "c_user", "value": "...", ...}, ...]
+    if isinstance(cookies_list, list):
+        return {c["name"]: c["value"] for c in cookies_list if "name" in c and "value" in c}
+    # 已經是 dict 格式
+    if isinstance(cookies_list, dict):
+        return cookies_list
+    return {}
 
 
 class ScraperBackend(ABC):
@@ -29,6 +58,192 @@ class ScraperBackend(ABC):
         ...
 
 
+class MbasicBackend(ScraperBackend):
+    """使用 mbasic.facebook.com 的輕量引擎（推薦）
+
+    mbasic.facebook.com 是 Facebook 的基本版行動網站，
+    提供純靜態 HTML，不需要 JavaScript 渲染，DOM 結構簡單穩定。
+    需要帶入 cookies 進行認證。
+    """
+
+    @property
+    def name(self) -> str:
+        return "mbasic"
+
+    def is_available(self) -> bool:
+        try:
+            import requests  # noqa: F401
+            from bs4 import BeautifulSoup  # noqa: F401
+            return True
+        except ImportError:
+            return False
+
+    def _build_session(self, cookies_path: str):
+        """建立帶有 cookies 的 requests session"""
+        import requests
+
+        session = requests.Session()
+        session.headers.update({
+            "User-Agent": (
+                "Mozilla/5.0 (Linux; Android 12; Pixel 6) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Mobile Safari/537.36"
+            ),
+            "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
+        })
+
+        if cookies_path:
+            cookie_dict = _load_cookies_as_dict(cookies_path)
+            if cookie_dict:
+                session.cookies.update(cookie_dict)
+                logger.info("已載入 %d 個 cookies", len(cookie_dict))
+            else:
+                logger.warning("cookies 檔案為空或格式不正確: %s", cookies_path)
+
+        return session
+
+    def _parse_page(self, html: str, author: AuthorConfig, base_url: str) -> tuple[list[Post], str]:
+        """解析 mbasic 頁面，回傳 (貼文列表, 下一頁URL)"""
+        from bs4 import BeautifulSoup
+
+        now = datetime.now(timezone.utc).isoformat()
+        soup = BeautifulSoup(html, "html.parser")
+        posts = []
+
+        # mbasic 的貼文在 <article> 標籤或帶有特定結構的 <div> 中
+        # 嘗試多種選擇器以適應不同頁面結構
+        articles = soup.find_all("article")
+        if not articles:
+            # 備用：找包含 story_body_container 的 div
+            articles = soup.find_all("div", {"class": re.compile(r"(story|post)", re.I)})
+        if not articles:
+            # 再備用：找 id 含 "u_0_" 的 section（mbasic 常見模式）
+            for section in soup.find_all(["div", "section"]):
+                section_id = section.get("id", "")
+                if section_id and "u_0_" in section_id:
+                    # 檢查是否有足夠的文字內容
+                    text = section.get_text(strip=True)
+                    if len(text) > 30:
+                        articles.append(section)
+
+        seen_texts = set()
+        for article in articles:
+            if len(posts) >= author.max_posts:
+                break
+
+            # 取得貼文內容
+            # mbasic 中，貼文文字通常在 <p> 或直接在 div 內
+            text_parts = []
+            for p in article.find_all(["p", "div"]):
+                t = p.get_text(strip=True)
+                if t and len(t) > 5:
+                    text_parts.append(t)
+
+            if not text_parts:
+                text = article.get_text(strip=True)
+            else:
+                text = "\n".join(dict.fromkeys(text_parts))  # 去重保持順序
+
+            if not text or len(text) < 10:
+                continue
+
+            # 去重
+            text_key = text[:100]
+            if text_key in seen_texts:
+                continue
+            seen_texts.add(text_key)
+
+            # 取得時間戳
+            timestamp = ""
+            abbr = article.find("abbr")
+            if abbr:
+                timestamp = abbr.get_text(strip=True)
+
+            # 取得貼文連結
+            link = ""
+            for a_tag in article.find_all("a", href=True):
+                href = a_tag["href"]
+                if "/story.php" in href or "/permalink" in href or "/posts/" in href:
+                    link = urljoin(MBASIC_BASE, href)
+                    break
+
+            # 取得 post_id
+            post_id = ""
+            if link:
+                # 嘗試從連結提取 ID
+                id_match = re.search(r'(?:story_fbid=|/posts/)(\d+)', link)
+                if id_match:
+                    post_id = id_match.group(1)
+            if not post_id:
+                post_id = f"mb_{hash(text) & 0xFFFFFFFF:08x}"
+
+            post = Post(
+                post_id=post_id,
+                author_name=author.name,
+                text=text,
+                timestamp=timestamp,
+                link=link,
+                fetched_at=now,
+            )
+            posts.append(post)
+
+        # 找「查看更多帖子」/ "See more posts" 連結
+        next_url = ""
+        for a_tag in soup.find_all("a", href=True):
+            link_text = a_tag.get_text(strip=True).lower()
+            if any(kw in link_text for kw in ["顯示更多", "更多帖子", "see more", "show more"]):
+                next_url = urljoin(MBASIC_BASE, a_tag["href"])
+                break
+
+        return posts, next_url
+
+    def fetch_posts(self, author: AuthorConfig, cookies: str = "") -> list[Post]:
+        import requests
+
+        if not cookies:
+            raise RuntimeError(
+                "mbasic 引擎需要 cookies 認證。"
+                "請先執行: python facebook_tracker.py setup-cookies"
+            )
+
+        session = self._build_session(cookies)
+        account = _extract_account(author.url)
+        url = f"{MBASIC_BASE}/{account}"
+
+        all_posts = []
+        pages_fetched = 0
+        max_pages = 3  # 最多翻 3 頁
+
+        while url and pages_fetched < max_pages and len(all_posts) < author.max_posts:
+            logger.info("抓取頁面: %s (第 %d 頁)", url, pages_fetched + 1)
+
+            try:
+                resp = session.get(url, timeout=15)
+                resp.raise_for_status()
+            except requests.RequestException as e:
+                if pages_fetched == 0:
+                    raise RuntimeError(f"無法存取 {url}: {e}")
+                logger.warning("翻頁失敗，停止: %s", e)
+                break
+
+            # 檢查是否被導向登入頁
+            if "/login" in resp.url:
+                raise RuntimeError(
+                    "被導向登入頁面，cookies 可能已過期。"
+                    "請重新執行: python facebook_tracker.py setup-cookies"
+                )
+
+            posts, next_url = self._parse_page(resp.text, author, url)
+            all_posts.extend(posts)
+            url = next_url
+            pages_fetched += 1
+
+            if next_url:
+                time.sleep(1)  # 頁面間延遲
+
+        return all_posts[:author.max_posts]
+
+
 class FacebookScraperBackend(ScraperBackend):
     """使用 facebook-scraper 套件的輕量引擎"""
 
@@ -43,19 +258,13 @@ class FacebookScraperBackend(ScraperBackend):
         except ImportError:
             return False
 
-    def _extract_account(self, url: str) -> str:
-        """從 URL 擷取帳號名稱或 ID"""
-        url = url.rstrip("/")
-        parts = url.split("/")
-        return parts[-1] if parts else url
-
     def fetch_posts(self, author: AuthorConfig, cookies: str = "") -> list[Post]:
         from facebook_scraper import get_posts, set_cookies
 
         if cookies:
             set_cookies(cookies)
 
-        account = self._extract_account(author.url)
+        account = _extract_account(author.url)
         now = datetime.now(timezone.utc).isoformat()
         posts = []
 
@@ -199,12 +408,12 @@ class PlaywrightBackend(ScraperBackend):
 class Scraper:
     """抓取器門面 — 管理引擎選擇與 fallback"""
 
-    def __init__(self, primary_backend: str = "facebook-scraper", cookies: str = ""):
+    def __init__(self, primary_backend: str = "mbasic", cookies: str = ""):
         self.cookies = cookies
         self._backends: dict[str, ScraperBackend] = {}
 
-        # 註冊可用引擎
-        for backend_cls in [FacebookScraperBackend, PlaywrightBackend]:
+        # 註冊可用引擎（mbasic 優先）
+        for backend_cls in [MbasicBackend, FacebookScraperBackend, PlaywrightBackend]:
             backend = backend_cls()
             if backend.is_available():
                 self._backends[backend.name] = backend
