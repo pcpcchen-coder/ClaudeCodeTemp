@@ -78,18 +78,29 @@ class MbasicBackend(ScraperBackend):
         except ImportError:
             return False
 
+    # mbasic.facebook.com 設計給功能型手機，需要使用舊款/簡易 User-Agent
+    # 現代 Chrome Mobile UA 會被封鎖（顯示「不支援的瀏覽器」攔截頁）
+    MBASIC_USER_AGENTS = [
+        # 舊版 Android WebView（最常見的通過方式）
+        (
+            "Mozilla/5.0 (Linux; U; Android 4.0.3; zh-tw; GT-I9100 Build/IML74K) "
+            "AppleWebKit/534.30 (KHTML, like Gecko) Version/4.0 Mobile Safari/534.30"
+        ),
+        # 功能型手機
+        "Nokia5230/s60v5 (SymbianOS/9.4; U; Series60/5.0; Profile/MIDP-2.1 Configuration/CLDC-1.1)",
+        # UCWEB（常見的功能手機瀏覽器）
+        "UCWEB/2.0 (Linux; U; Opera Mini/7.1.32052/30.3697; en-US; SM-G900T) U2/1.0.0 UCBrowser/9.8.0.534 Mobile",
+    ]
+
     def _build_session(self, cookies_path: str):
         """建立帶有 cookies 的 requests session"""
         import requests
 
         session = requests.Session()
         session.headers.update({
-            "User-Agent": (
-                "Mozilla/5.0 (Linux; Android 12; Pixel 6) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Mobile Safari/537.36"
-            ),
+            "User-Agent": self.MBASIC_USER_AGENTS[0],
             "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         })
 
         if cookies_path:
@@ -272,6 +283,44 @@ class MbasicBackend(ScraperBackend):
 
         return posts, next_url
 
+    def _is_blocked_page(self, html: str) -> bool:
+        """偵測是否被 mbasic 攔截（不支援的瀏覽器頁面）"""
+        return "unsupported-interstitial" in html or "無法在此瀏覽器上使用" in html
+
+    def _fetch_with_ua_retry(self, session, url: str, account: str) -> str:
+        """嘗試多個 User-Agent 來繞過 mbasic 的瀏覽器封鎖"""
+        import requests
+
+        for i, ua in enumerate(self.MBASIC_USER_AGENTS):
+            session.headers["User-Agent"] = ua
+            logger.debug("嘗試 UA #%d: %s...", i + 1, ua[:50])
+
+            try:
+                resp = session.get(url, timeout=15)
+                resp.raise_for_status()
+            except requests.RequestException as e:
+                raise RuntimeError(f"無法存取 {url}: {e}")
+
+            # 檢查登入狀態
+            if "/login" in resp.url:
+                raise RuntimeError(
+                    "被導向登入頁面，cookies 可能已過期。"
+                    "請重新執行: python facebook_tracker.py setup-cookies"
+                )
+
+            if not self._is_blocked_page(resp.text):
+                if i > 0:
+                    logger.info("UA #%d 成功通過 mbasic 檢查", i + 1)
+                return resp.text
+
+            logger.debug("UA #%d 被封鎖，嘗試下一個", i + 1)
+
+        # 所有 UA 都被封鎖
+        raise RuntimeError(
+            "所有 User-Agent 皆被 mbasic.facebook.com 封鎖。"
+            "Facebook 可能已更新封鎖策略。"
+        )
+
     def fetch_posts(self, author: AuthorConfig, cookies: str = "") -> list[Post]:
         import requests
 
@@ -292,31 +341,28 @@ class MbasicBackend(ScraperBackend):
         while url and pages_fetched < max_pages and len(all_posts) < author.max_posts:
             logger.info("抓取頁面: %s (第 %d 頁)", url, pages_fetched + 1)
 
-            try:
-                resp = session.get(url, timeout=15)
-                resp.raise_for_status()
-            except requests.RequestException as e:
-                if pages_fetched == 0:
-                    raise RuntimeError(f"無法存取 {url}: {e}")
-                logger.warning("翻頁失敗，停止: %s", e)
-                break
-
-            # 檢查是否被導向登入頁
-            if "/login" in resp.url:
-                raise RuntimeError(
-                    "被導向登入頁面，cookies 可能已過期。"
-                    "請重新執行: python facebook_tracker.py setup-cookies"
-                )
+            if pages_fetched == 0:
+                # 第一頁：嘗試多個 UA
+                html = self._fetch_with_ua_retry(session, url, account)
+            else:
+                # 後續頁面：用已成功的 UA
+                try:
+                    resp = session.get(url, timeout=15)
+                    resp.raise_for_status()
+                    html = resp.text
+                except requests.RequestException as e:
+                    logger.warning("翻頁失敗，停止: %s", e)
+                    break
 
             # Debug: 儲存原始 HTML
             if logger.isEnabledFor(logging.DEBUG):
                 debug_dir = Path("debug")
                 debug_dir.mkdir(exist_ok=True)
                 debug_file = debug_dir / f"{account}_page{pages_fetched}.html"
-                debug_file.write_text(resp.text, encoding="utf-8")
-                logger.debug("已儲存 debug HTML: %s (%d bytes)", debug_file, len(resp.text))
+                debug_file.write_text(html, encoding="utf-8")
+                logger.debug("已儲存 debug HTML: %s (%d bytes)", debug_file, len(html))
 
-            posts, next_url = self._parse_page(resp.text, author, url)
+            posts, next_url = self._parse_page(html, author, url)
             all_posts.extend(posts)
             url = next_url
             pages_fetched += 1
