@@ -102,6 +102,62 @@ class MbasicBackend(ScraperBackend):
 
         return session
 
+    def _find_post_containers(self, soup) -> list:
+        """用多種策略找出貼文容器元素"""
+        # 策略 1: div[data-ft] — mbasic 最常見的貼文容器
+        containers = soup.find_all("div", attrs={"data-ft": True})
+        if containers:
+            logger.debug("選擇器命中: div[data-ft], 找到 %d 個", len(containers))
+            return containers
+
+        # 策略 2: <article> 標籤
+        containers = soup.find_all("article")
+        if containers:
+            logger.debug("選擇器命中: <article>, 找到 %d 個", len(containers))
+            return containers
+
+        # 策略 3: 含 story/post 的 class
+        containers = soup.find_all("div", {"class": re.compile(r"(story|post)", re.I)})
+        if containers:
+            logger.debug("選擇器命中: div.story/post, 找到 %d 個", len(containers))
+            return containers
+
+        # 策略 4: id 含 u_ 開頭的 div（mbasic 常見 ID 模式）
+        containers = soup.find_all("div", id=re.compile(r"^u_\d+"))
+        if containers:
+            logger.debug("選擇器命中: div#u_*, 找到 %d 個", len(containers))
+            return containers
+
+        logger.debug("所有選擇器皆未命中")
+        return []
+
+    def _extract_post_text(self, container) -> str:
+        """從貼文容器中提取文字內容"""
+        # 優先用 <p> 標籤（mbasic 的貼文內容主要在 <p> 中）
+        paragraphs = container.find_all("p")
+        if paragraphs:
+            parts = []
+            for p in paragraphs:
+                t = p.get_text(strip=True)
+                if t:
+                    parts.append(t)
+            if parts:
+                return "\n".join(parts)
+
+        # 備用：找 dir="auto" 的 div/span（Facebook 常用於文字內容）
+        auto_divs = container.find_all(["div", "span"], attrs={"dir": "auto"})
+        if auto_divs:
+            parts = []
+            for d in auto_divs:
+                t = d.get_text(strip=True)
+                if t and len(t) > 5:
+                    parts.append(t)
+            if parts:
+                return "\n".join(dict.fromkeys(parts))
+
+        # 最終備用：取整個容器的文字
+        return container.get_text(strip=True)
+
     def _parse_page(self, html: str, author: AuthorConfig, base_url: str) -> tuple[list[Post], str]:
         """解析 mbasic 頁面，回傳 (貼文列表, 下一頁URL)"""
         from bs4 import BeautifulSoup
@@ -110,39 +166,30 @@ class MbasicBackend(ScraperBackend):
         soup = BeautifulSoup(html, "html.parser")
         posts = []
 
-        # mbasic 的貼文在 <article> 標籤或帶有特定結構的 <div> 中
-        # 嘗試多種選擇器以適應不同頁面結構
-        articles = soup.find_all("article")
-        if not articles:
-            # 備用：找包含 story_body_container 的 div
-            articles = soup.find_all("div", {"class": re.compile(r"(story|post)", re.I)})
-        if not articles:
-            # 再備用：找 id 含 "u_0_" 的 section（mbasic 常見模式）
-            for section in soup.find_all(["div", "section"]):
-                section_id = section.get("id", "")
-                if section_id and "u_0_" in section_id:
-                    # 檢查是否有足夠的文字內容
-                    text = section.get_text(strip=True)
-                    if len(text) > 30:
-                        articles.append(section)
+        containers = self._find_post_containers(soup)
+
+        # 過濾掉過小或嵌套的容器（data-ft 的 div 可能有巢狀關係）
+        # 只保留最外層的貼文容器
+        if containers:
+            filtered = []
+            for c in containers:
+                # 檢查此容器是否是另一個容器的子元素
+                is_nested = False
+                for other in containers:
+                    if other is not c and c in other.descendants:
+                        is_nested = True
+                        break
+                if not is_nested:
+                    filtered.append(c)
+            containers = filtered
+            logger.debug("過濾巢狀後剩餘 %d 個容器", len(containers))
 
         seen_texts = set()
-        for article in articles:
+        for container in containers:
             if len(posts) >= author.max_posts:
                 break
 
-            # 取得貼文內容
-            # mbasic 中，貼文文字通常在 <p> 或直接在 div 內
-            text_parts = []
-            for p in article.find_all(["p", "div"]):
-                t = p.get_text(strip=True)
-                if t and len(t) > 5:
-                    text_parts.append(t)
-
-            if not text_parts:
-                text = article.get_text(strip=True)
-            else:
-                text = "\n".join(dict.fromkeys(text_parts))  # 去重保持順序
+            text = self._extract_post_text(container)
 
             if not text or len(text) < 10:
                 continue
@@ -153,25 +200,41 @@ class MbasicBackend(ScraperBackend):
                 continue
             seen_texts.add(text_key)
 
-            # 取得時間戳
+            # 時間戳：<abbr> 標籤
             timestamp = ""
-            abbr = article.find("abbr")
+            abbr = container.find("abbr")
             if abbr:
                 timestamp = abbr.get_text(strip=True)
 
-            # 取得貼文連結
+            # 貼文連結
             link = ""
-            for a_tag in article.find_all("a", href=True):
+            for a_tag in container.find_all("a", href=True):
                 href = a_tag["href"]
-                if "/story.php" in href or "/permalink" in href or "/posts/" in href:
+                if any(kw in href for kw in ["/story.php", "/permalink", "/posts/", "photo.php"]):
                     link = urljoin(MBASIC_BASE, href)
                     break
 
-            # 取得 post_id
+            # 互動數：嘗試找 reaction 連結
+            likes = 0
+            for a_tag in container.find_all("a", href=True):
+                if "reaction/profile" in a_tag.get("href", ""):
+                    reaction_text = a_tag.get_text(strip=True)
+                    nums = re.findall(r"[\d,]+", reaction_text)
+                    if nums:
+                        likes = int(nums[0].replace(",", ""))
+                    break
+
+            # post_id：從 data-ft 或連結提取
             post_id = ""
-            if link:
-                # 嘗試從連結提取 ID
-                id_match = re.search(r'(?:story_fbid=|/posts/)(\d+)', link)
+            data_ft = container.get("data-ft", "")
+            if data_ft:
+                try:
+                    ft_data = json.loads(data_ft)
+                    post_id = str(ft_data.get("top_level_post_id", ""))
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            if not post_id and link:
+                id_match = re.search(r'(?:story_fbid=|/posts/|fbid=)(\d+)', link)
                 if id_match:
                     post_id = id_match.group(1)
             if not post_id:
@@ -182,18 +245,30 @@ class MbasicBackend(ScraperBackend):
                 author_name=author.name,
                 text=text,
                 timestamp=timestamp,
+                likes=likes,
                 link=link,
                 fetched_at=now,
             )
             posts.append(post)
 
-        # 找「查看更多帖子」/ "See more posts" 連結
+        # 翻頁連結：找含 timestart= 的 <a>
         next_url = ""
         for a_tag in soup.find_all("a", href=True):
-            link_text = a_tag.get_text(strip=True).lower()
-            if any(kw in link_text for kw in ["顯示更多", "更多帖子", "see more", "show more"]):
-                next_url = urljoin(MBASIC_BASE, a_tag["href"])
+            href = a_tag["href"]
+            if "timestart=" in href or "bacr=" in href:
+                next_url = urljoin(MBASIC_BASE, href)
+                logger.debug("找到翻頁連結: %s", next_url)
                 break
+        # 備用：文字匹配翻頁
+        if not next_url:
+            for a_tag in soup.find_all("a", href=True):
+                link_text = a_tag.get_text(strip=True).lower()
+                if any(kw in link_text for kw in [
+                    "顯示更多", "更多帖子", "see more", "show more",
+                    "查看更多", "更多動態", "older posts",
+                ]):
+                    next_url = urljoin(MBASIC_BASE, a_tag["href"])
+                    break
 
         return posts, next_url
 
@@ -232,6 +307,14 @@ class MbasicBackend(ScraperBackend):
                     "被導向登入頁面，cookies 可能已過期。"
                     "請重新執行: python facebook_tracker.py setup-cookies"
                 )
+
+            # Debug: 儲存原始 HTML
+            if logger.isEnabledFor(logging.DEBUG):
+                debug_dir = Path("debug")
+                debug_dir.mkdir(exist_ok=True)
+                debug_file = debug_dir / f"{account}_page{pages_fetched}.html"
+                debug_file.write_text(resp.text, encoding="utf-8")
+                logger.debug("已儲存 debug HTML: %s (%d bytes)", debug_file, len(resp.text))
 
             posts, next_url = self._parse_page(resp.text, author, url)
             all_posts.extend(posts)
