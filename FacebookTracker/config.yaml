@@ -1,0 +1,47 @@
+# Facebook Content Tracker 設定檔
+# 請根據您的需求修改以下設定
+
+# 抓取引擎: "facebook-scraper" (輕量快速) 或 "playwright" (較穩定)
+scraper_backend: "facebook-scraper"
+
+# 輸出目錄（相對於 FacebookTracker/）
+output_dir: "output"
+
+# 每位作者之間的請求延遲（秒），避免被封鎖
+request_delay_s: 3.0
+
+# Facebook cookies 檔案路徑（抓取個人檔案時需要）
+# 留空表示不使用 cookies（僅能抓取公開粉絲專頁）
+# 取得方式：使用瀏覽器擴充功能匯出 cookies 為 JSON 格式
+facebook_cookies: ""
+
+# 追蹤作者清單
+authors:
+  - name: "黃仁勳 Jensen Huang"
+    url: "https://www.facebook.com/JensenHuang"
+    type: "page"
+    enabled: true
+    max_posts: 10
+    keywords: ["AI", "GPU", "NVIDIA", "CUDA"]
+
+  - name: "李開復 Kai-Fu Lee"
+    url: "https://www.facebook.com/kaifulee"
+    type: "page"
+    enabled: true
+    max_posts: 10
+    keywords: ["AI", "人工智慧", "大模型", "AGI"]
+
+  - name: "Andrew Ng"
+    url: "https://www.facebook.com/andrew.ng.96"
+    type: "profile"
+    enabled: true
+    max_posts: 5
+    keywords: []
+
+  # 新增作者範例（取消註解並修改）：
+  # - name: "作者名稱"
+  #   url: "https://www.facebook.com/作者ID"
+  #   type: "page"       # "page" 或 "profile"
+  #   enabled: true
+  #   max_posts: 10
+  #   keywords: ["關鍵字1", "關鍵字2"]
