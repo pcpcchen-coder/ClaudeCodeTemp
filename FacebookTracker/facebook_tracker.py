@@ -281,6 +281,7 @@ def main():
     # run
     run_parser = subparsers.add_parser("run", help="執行抓取")
     run_parser.add_argument("--author", default="", help="只抓取特定作者（名稱關鍵字）")
+    run_parser.add_argument("--debug", action="store_true", help="儲存原始 HTML 到 debug/ 以便除錯")
 
     # list
     subparsers.add_parser("list", help="顯示已設定的作者")
@@ -292,7 +293,8 @@ def main():
     args = parser.parse_args()
 
     # 設定 logging
-    log_level = logging.DEBUG if args.verbose else logging.WARNING
+    debug_mode = args.verbose or getattr(args, "debug", False)
+    log_level = logging.DEBUG if debug_mode else logging.WARNING
     logging.basicConfig(
         level=log_level,
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",

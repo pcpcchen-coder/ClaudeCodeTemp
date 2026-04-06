@@ -3,3 +3,4 @@
 *.png
 FacebookTracker/output/
 FacebookTracker/cookies.json
+FacebookTracker/debug/
