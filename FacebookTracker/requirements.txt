@@ -1,0 +1,13 @@
+# Facebook Content Tracker 依賴
+# 安裝: pip install -r requirements.txt
+
+# 抓取引擎（至少安裝一個）
+facebook-scraper>=0.2.59       # 輕量抓取引擎（主要）
+playwright>=1.40.0             # 瀏覽器自動化引擎（備援）
+beautifulsoup4>=4.12.0         # HTML 解析（Playwright 引擎使用）
+
+# 設定檔解析
+PyYAML>=6.0
+
+# 安裝 Playwright 瀏覽器（安裝完 pip 套件後執行）:
+# playwright install chromium
