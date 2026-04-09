@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ems.example.com/schemas/twin_simulation_result/v1",
+  "title": "TwinSimulationResult",
+  "description": "Digital Twin Agent 對 OrchProposal 的事前模擬結果",
+  "type": "object",
+  "required": ["tick_id", "feasible", "expected_kpi", "risks", "confidence"],
+  "additionalProperties": false,
+  "properties": {
+    "tick_id": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F-]{36}$"
+    },
+    "simulated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "feasible": {
+      "type": "boolean",
+      "description": "在物理與工程約束下是否可執行"
+    },
+    "infeasibility_reasons": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "expected_kpi": {
+      "type": "object",
+      "required": ["efficiency", "revenue_cny", "soh_degradation_ppm", "max_battery_temp_c"],
+      "additionalProperties": false,
+      "properties": {
+        "efficiency": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "整體 round-trip 效率"
+        },
+        "revenue_cny": { "type": "number" },
+        "soh_degradation_ppm": {
+          "type": "number",
+          "minimum": 0,
+          "description": "本 tick 預估造成的 SOH 衰退（百萬分之一）"
+        },
+        "max_battery_temp_c": { "type": "number" },
+        "max_pcs_loading": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1.5
+        }
+      }
+    },
+    "risks": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/Risk" }
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "模型對本次預測的整體信心度"
+    },
+    "model_version": {
+      "type": "string"
+    }
+  },
+  "$defs": {
+    "Risk": {
+      "type": "object",
+      "required": ["type", "probability", "severity", "mitigation"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "thermal_runaway",
+            "over_voltage",
+            "under_voltage",
+            "pcs_overload",
+            "grid_violation",
+            "communication_loss",
+            "model_uncertain",
+            "other"
+          ]
+        },
+        "probability": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "severity": {
+          "type": "string",
+          "enum": ["info", "low", "medium", "high", "critical"]
+        },
+        "affected_targets": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "mitigation": {
+          "type": "string",
+          "minLength": 5
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,112 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ems.example.com/schemas/orch_proposal/v1",
+  "title": "OrchProposal",
+  "description": "ORCH 在每個 tick 整合下級 Agent 回覆後，提交給 TWIN 與 GUARD 的提案",
+  "type": "object",
+  "required": ["tick_id", "timestamp", "state_class", "actions", "rationale"],
+  "additionalProperties": false,
+  "properties": {
+    "tick_id": {
+      "type": "string",
+      "description": "本 tick 的唯一識別碼，建議用 UUIDv7 取得時間排序性",
+      "pattern": "^[0-9a-fA-F-]{36}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 UTC 時間戳"
+    },
+    "state_class": {
+      "type": "string",
+      "enum": ["normal", "congested", "abnormal", "emergency", "unknown"],
+      "description": "ORCH 對當前站點狀態的判斷"
+    },
+    "actions": {
+      "type": "array",
+      "minItems": 0,
+      "items": { "$ref": "#/$defs/Action" }
+    },
+    "rationale": {
+      "type": "string",
+      "minLength": 10,
+      "maxLength": 2000,
+      "description": "ORCH 為此 proposal 給出的人類可讀理由"
+    },
+    "consulted_agents": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": ["PRICE", "BATT", "DISP", "GRID", "APP"]
+      },
+      "description": "本 tick 真正諮詢的 Agent 清單"
+    },
+    "estimated_revenue_cny": {
+      "type": "number",
+      "description": "預估本 tick 收益，正為收入、負為成本"
+    },
+    "human_intervention_needed": {
+      "type": "boolean",
+      "default": false
+    },
+    "human_intervention_reason": {
+      "type": ["string", "null"]
+    }
+  },
+  "$defs": {
+    "Action": {
+      "type": "object",
+      "required": ["action_type", "target_id", "target_power_kw", "duration_seconds"],
+      "additionalProperties": false,
+      "properties": {
+        "action_type": {
+          "type": "string",
+          "enum": [
+            "charge",
+            "discharge",
+            "idle",
+            "switch_pcs_dcdc",
+            "ac_setpoint",
+            "respond_dr",
+            "publish_app_notice"
+          ]
+        },
+        "target_id": {
+          "type": "string",
+          "description": "目標物件 ID，例如 PCS-03、BATT-12、DCDC-07"
+        },
+        "target_power_kw": {
+          "type": "number",
+          "description": "充放電功率（kW），充為正、放為負；非功率類動作填 0"
+        },
+        "target_soc_min": {
+          "type": "number",
+          "minimum": 0.05,
+          "maximum": 1.0,
+          "description": "本動作允許達到的最低 SOC 比例"
+        },
+        "target_soc_max": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 1.0
+        },
+        "duration_seconds": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3600
+        },
+        "priority": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10,
+          "default": 5
+        },
+        "depends_on": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "依賴的其他 action ID，用於 sequencing"
+        }
+      }
+    }
+  }
+}

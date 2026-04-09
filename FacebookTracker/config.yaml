@@ -1,7 +1,7 @@
 # Facebook Content Tracker 設定檔
 # 請根據您的需求修改以下設定
 
-# 抓取引擎: "mbasic" (推薦，需cookies) / "facebook-scraper" / "playwright"
+# 抓取引擎: "facebook-scraper" (輕量快速) 或 "playwright" (較穩定)
 scraper_backend: "mbasic"
 
 # 輸出目錄（相對於 FacebookTracker/）
@@ -10,8 +10,9 @@ output_dir: "output"
 # 每位作者之間的請求延遲（秒），避免被封鎖
 request_delay_s: 3.0
 
-# Facebook cookies 檔案路徑（mbasic 引擎必須，其他引擎建議提供）
-# 取得方式：執行 python facebook_tracker.py setup-cookies
+# Facebook cookies 檔案路徑（抓取個人檔案時需要）
+# 留空表示不使用 cookies（僅能抓取公開粉絲專頁）
+# 取得方式：使用瀏覽器擴充功能匯出 cookies 為 JSON 格式
 facebook_cookies: "cookies.json"
 
 # 追蹤作者清單
@@ -35,6 +36,13 @@ authors:
     type: "profile"
     enabled: true
     max_posts: 5
+    keywords: []
+
+  - name: "蕭上農"
+    url: "https://www.facebook.com/hinet"
+    type: "page"
+    enabled: true
+    max_posts: 10
     keywords: []
 
   # 新增作者範例（取消註解並修改）：

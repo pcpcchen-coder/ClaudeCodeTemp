@@ -1,0 +1,23 @@
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file: .env
+    depends_on:
+      - db
+    restart: unless-stopped
+
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ems
+      POSTGRES_PASSWORD: ems
+      POSTGRES_DB: shadow
+    volumes:
+      - shadow_pg:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+volumes:
+  shadow_pg:

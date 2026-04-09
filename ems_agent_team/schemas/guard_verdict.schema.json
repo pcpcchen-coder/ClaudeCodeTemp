@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ems.example.com/schemas/guard_verdict/v1",
+  "title": "GuardVerdict",
+  "description": "GUARD Agent 對 OrchProposal 的最終審核結果",
+  "type": "object",
+  "required": ["tick_id", "status", "checked_at"],
+  "additionalProperties": false,
+  "properties": {
+    "tick_id": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F-]{36}$"
+    },
+    "checked_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "status": {
+      "type": "string",
+      "enum": ["approved", "modified", "rejected"]
+    },
+    "rejection_reason": {
+      "type": ["string", "null"],
+      "description": "status=rejected 時必填"
+    },
+    "rejected_red_lines": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "thermal_runaway_risk",
+          "ramp_rate_violation",
+          "soc_lower_bound",
+          "soc_upper_bound",
+          "pcs_overload",
+          "topology_conflict",
+          "iec_62619",
+          "iec_62443",
+          "gb_t_36276",
+          "mlps_2_0",
+          "unauthorized_financial_commit",
+          "suspected_prompt_injection",
+          "other"
+        ]
+      }
+    },
+    "modifications": {
+      "type": "array",
+      "description": "status=modified 時的修改清單，每個元素是要替換的 action",
+      "items": {
+        "type": "object",
+        "required": ["original_action_index", "modified_action"],
+        "properties": {
+          "original_action_index": { "type": "integer", "minimum": 0 },
+          "modified_action": { "type": "object" },
+          "reason": { "type": "string" }
+        }
+      }
+    },
+    "alternative_suggestion": {
+      "type": ["string", "null"],
+      "description": "若否決，建議的替代方向"
+    },
+    "monitoring_points": {
+      "type": "array",
+      "description": "通過時，要求下游額外監測的點",
+      "items": {
+        "type": "object",
+        "required": ["target_id", "metric", "threshold"],
+        "properties": {
+          "target_id": { "type": "string" },
+          "metric": {
+            "type": "string",
+            "enum": ["temperature", "voltage", "current", "soc", "power"]
+          },
+          "threshold": { "type": "number" },
+          "duration_seconds": { "type": "integer" }
+        }
+      }
+    },
+    "checked_by_rules": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "本次審核實際觸發的規則 ID 清單"
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "const": "rejected" } } },
+      "then": { "required": ["rejection_reason", "rejected_red_lines"] }
+    },
+    {
+      "if": { "properties": { "status": { "const": "modified" } } },
+      "then": { "required": ["modifications"] }
+    }
+  ]
+}
