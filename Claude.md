@@ -1,0 +1,4 @@
+keep explanations brief and to the point; interact by 繁體中文
+Add under a new ## Integrations section at the top level of CLAUDE.md\n\nWhen working with Notion, use the already-configured Notion MCP server. Do not attempt to use raw API calls or ask the user to set up Notion integration mid-session.
+Add under a new ## Git Workflow section\n\nBefore pushing to GitHub, verify SSH keys are configured by running `ssh -T git@github.com`. If not set up, guide the user through key generation and adding to GitHub before attempting any git push.
+Add under a new ## Code Generation Guidelines section\n\nWhen generating standalone desktop applications (pygame, tkinter, etc.), do not treat them as web servers or assign ports. Distinguish between local GUI apps and web-based projects.
